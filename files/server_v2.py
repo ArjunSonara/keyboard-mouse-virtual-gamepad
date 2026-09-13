@@ -395,6 +395,18 @@ def tcp_listener():
 # ---------------------------------------------------------------------------
 # Local IP detection + QR pairing popup
 # ---------------------------------------------------------------------------
+NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
+
+def silent_run(*args, **kwargs):
+    if NO_WINDOW:
+        kwargs["creationflags"] = NO_WINDOW
+    return subprocess.run(*args, **kwargs)
+
+def silent_check_output(*args, **kwargs):
+    if NO_WINDOW:
+        kwargs["creationflags"] = NO_WINDOW
+    return subprocess.check_output(*args, **kwargs)
+
 def get_local_ip():
     """
     Finds the best local IPv4 address (prioritizing physical Wi-Fi or Ethernet
@@ -404,7 +416,7 @@ def get_local_ip():
     try:
         import subprocess
         import re
-        out = subprocess.check_output("ipconfig", text=True, errors="ignore")
+        out = silent_check_output("ipconfig", text=True, errors="ignore")
         current_name = ""
         for line in out.splitlines():
             line = line.rstrip()
@@ -482,6 +494,58 @@ def show_qr_popup(ip: str, port: int):
     root.mainloop()
 
 
+_last_reversed_devices = set()
+
+def auto_adb_reverse():
+    """
+    Automatically detects connected USB Android devices and runs
+    adb reverse tcp:PORT tcp:PORT so the user never needs to type it manually.
+    """
+    global _last_reversed_devices
+    import subprocess
+    import os
+    candidates = [
+        "adb",
+        r"C:\Users\arjun\AppData\Local\Android\Sdk\platform-tools\adb.exe",
+        os.path.expandvars(r"%LOCALAPPDATA%\Android\Sdk\platform-tools\adb.exe"),
+    ]
+    adb_bin = None
+    for c in candidates:
+        try:
+            r = silent_run([c, "version"], capture_output=True, text=True, timeout=2)
+            if r.returncode == 0:
+                adb_bin = c
+                break
+        except Exception:
+            continue
+
+    if not adb_bin:
+        return
+
+    try:
+        r = silent_run([adb_bin, "devices"], capture_output=True, text=True, timeout=2)
+        devs = set([line.split("\t")[0].strip() for line in r.stdout.splitlines() if "\tdevice" in line])
+        if devs:
+            if devs != _last_reversed_devices:
+                rev = silent_run([adb_bin, "reverse", f"tcp:{PORT}", f"tcp:{PORT}"], capture_output=True, text=True, timeout=2)
+                if rev.returncode == 0:
+                    _last_reversed_devices = devs
+                    print(f"[Auto-USB] Port forwarded! (adb reverse tcp:{PORT} tcp:{PORT} active for {len(devs)} device)")
+            return
+        _last_reversed_devices.clear()
+    except Exception:
+        pass
+
+
+def _usb_watcher_loop():
+    while True:
+        try:
+            auto_adb_reverse()
+            time.sleep(4)
+        except Exception:
+            time.sleep(4)
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -493,8 +557,12 @@ def main():
     for name, aip in adapters.items():
         if aip != ip and not any(x in name.lower() for x in ["warp", "virtual"]):
             print(f"  Alternative IP ({name}) : {aip}:{PORT}")
-    print(f"  USB (adb reverse) : adb reverse tcp:{PORT} tcp:{PORT}")
+    print(f"  USB (adb reverse) : auto-configured on port {PORT}")
     print("=" * 60)
+
+    # Auto configure USB forwarding
+    auto_adb_reverse()
+    threading.Thread(target=_usb_watcher_loop, daemon=True).start()
 
     threading.Thread(target=udp_listener, daemon=True).start()
     threading.Thread(target=tcp_listener, daemon=True).start()

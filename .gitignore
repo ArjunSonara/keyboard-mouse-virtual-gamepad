@@ -16,6 +16,8 @@ __pycache__/
 *$py.class
 .venv/
 venv/
+dist/
+*.spec
 
 # Windows
 Thumbs.db

@@ -10,6 +10,12 @@ enum class ElementType {
     DPAD
 }
 
+enum class ButtonShape {
+    CIRCLE,
+    SQUARE,
+    ROUNDED_RECT
+}
+
 data class KeyOption(val code: String, val displayName: String)
 
 /**
@@ -101,7 +107,12 @@ data class HudElement(
     var scale: Float = 1.0f,
     val isCustom: Boolean = false,
     val customSlot: Int = -1, // 0..15 for custom buttons, -1 for stock
-    var zOrder: Int = 0
+    var zOrder: Int = 0,
+    var shape: ButtonShape = ButtonShape.CIRCLE,
+    var dpadUpKey: String = "h",
+    var dpadDownKey: String = "t",
+    var dpadLeftKey: String = "x",
+    var dpadRightKey: String = "x"
 ) {
     fun toJson(): JSONObject {
         val obj = JSONObject()
@@ -115,6 +126,13 @@ data class HudElement(
         obj.put("isCustom", isCustom)
         obj.put("customSlot", customSlot)
         obj.put("zOrder", zOrder)
+        obj.put("shape", shape.name)
+        if (type == ElementType.DPAD) {
+            obj.put("dpadUpKey", dpadUpKey)
+            obj.put("dpadDownKey", dpadDownKey)
+            obj.put("dpadLeftKey", dpadLeftKey)
+            obj.put("dpadRightKey", dpadRightKey)
+        }
         return obj
     }
 
@@ -122,6 +140,8 @@ data class HudElement(
         fun fromJson(obj: JSONObject): HudElement {
             val typeStr = obj.optString("type", ElementType.BUTTON.name)
             val type = try { ElementType.valueOf(typeStr) } catch (_: Exception) { ElementType.BUTTON }
+            val shapeStr = obj.optString("shape", ButtonShape.CIRCLE.name)
+            val shape = try { ButtonShape.valueOf(shapeStr) } catch (_: Exception) { ButtonShape.CIRCLE }
             return HudElement(
                 id = obj.getString("id"),
                 label = obj.optString("label", ""),
@@ -132,7 +152,12 @@ data class HudElement(
                 scale = obj.optDouble("scale", 1.0).toFloat(),
                 isCustom = obj.optBoolean("isCustom", false),
                 customSlot = obj.optInt("customSlot", -1),
-                zOrder = obj.optInt("zOrder", 0)
+                zOrder = obj.optInt("zOrder", 0),
+                shape = shape,
+                dpadUpKey = obj.optString("dpadUpKey", "h"),
+                dpadDownKey = obj.optString("dpadDownKey", "t"),
+                dpadLeftKey = obj.optString("dpadLeftKey", "x"),
+                dpadRightKey = obj.optString("dpadRightKey", "x")
             )
         }
     }
@@ -140,7 +165,12 @@ data class HudElement(
 
 object HudConfig {
     private const val PREFS_NAME = "virtualpad_hud"
-    private const val KEY_LAYOUT = "hud_layout_json"
+    private const val KEY_ACTIVE_PROFILE = "active_profile"
+    private const val KEY_PROFILES_LIST = "profiles_list"
+    private const val KEY_OPACITY = "hud_opacity"
+    private const val KEY_GYRO_ENABLED = "gyro_enabled"
+    private const val KEY_GYRO_SENSITIVITY = "gyro_sensitivity"
+    private const val KEY_GYRO_AIM_ONLY = "gyro_aim_only"
 
     fun getDefaultElements(): List<HudElement> {
         val list = mutableListOf<HudElement>()
@@ -148,38 +178,80 @@ object HudConfig {
 
         // Left Stick & D-Pad (Base Controls)
         list.add(HudElement(id = "leftstick", label = "STICK", key = "", type = ElementType.STICK, xPct = 0.13f, yPct = 0.62f, scale = 1.0f, zOrder = z++))
-        list.add(HudElement(id = "dpad", label = "D-PAD", key = "", type = ElementType.DPAD, xPct = 0.32f, yPct = 0.72f, scale = 1.0f, zOrder = z++))
+        list.add(HudElement(id = "dpad", label = "D-PAD", key = "", type = ElementType.DPAD, xPct = 0.32f, yPct = 0.72f, scale = 1.0f, zOrder = z++, dpadUpKey = "h", dpadDownKey = "t", dpadLeftKey = "x", dpadRightKey = "x"))
 
         // Bumpers & Triggers
-        list.add(HudElement(id = "lb", label = "LB (TAB)", key = "tab", type = ElementType.BUTTON, xPct = 0.10f, yPct = 0.11f, scale = 1.0f, zOrder = z++))
-        list.add(HudElement(id = "lt", label = "LT ([)", key = "[", type = ElementType.BUTTON, xPct = 0.23f, yPct = 0.11f, scale = 1.0f, zOrder = z++))
-        list.add(HudElement(id = "rt", label = "RT (;)", key = ";", type = ElementType.BUTTON, xPct = 0.77f, yPct = 0.11f, scale = 1.0f, zOrder = z++))
-        list.add(HudElement(id = "rb", label = "RB (Q)", key = "q", type = ElementType.BUTTON, xPct = 0.90f, yPct = 0.11f, scale = 1.0f, zOrder = z++))
+        list.add(HudElement(id = "lb", label = "LB (TAB)", key = "tab", type = ElementType.BUTTON, xPct = 0.10f, yPct = 0.11f, scale = 1.0f, zOrder = z++, shape = ButtonShape.ROUNDED_RECT))
+        list.add(HudElement(id = "lt", label = "LT (RMB)", key = "mouse_right", type = ElementType.BUTTON, xPct = 0.23f, yPct = 0.11f, scale = 1.0f, zOrder = z++, shape = ButtonShape.ROUNDED_RECT))
+        list.add(HudElement(id = "rt", label = "RT (LMB)", key = "mouse_left", type = ElementType.BUTTON, xPct = 0.77f, yPct = 0.11f, scale = 1.0f, zOrder = z++, shape = ButtonShape.ROUNDED_RECT))
+        list.add(HudElement(id = "rb", label = "RB (Q)", key = "q", type = ElementType.BUTTON, xPct = 0.90f, yPct = 0.11f, scale = 1.0f, zOrder = z++, shape = ButtonShape.ROUNDED_RECT))
 
         // ABXY Diamond
         val abxyCx = 0.87f
         val abxyCy = 0.60f
         val abxySpreadY = 0.11f
-        val abxySpreadX = 0.065f // adjusted for 16:9 landscape aspect
-        list.add(HudElement(id = "y", label = "Y (E)", key = "e", type = ElementType.BUTTON, xPct = abxyCx, yPct = abxyCy - abxySpreadY, scale = 1.0f, zOrder = z++))
-        list.add(HudElement(id = "a", label = "A (SHIFT)", key = "shift", type = ElementType.BUTTON, xPct = abxyCx, yPct = abxyCy + abxySpreadY, scale = 1.0f, zOrder = z++))
-        list.add(HudElement(id = "x", label = "X (SPACE)", key = "space", type = ElementType.BUTTON, xPct = abxyCx - abxySpreadX, yPct = abxyCy, scale = 1.0f, zOrder = z++))
-        list.add(HudElement(id = "b", label = "B (R)", key = "r", type = ElementType.BUTTON, xPct = abxyCx + abxySpreadX, yPct = abxyCy, scale = 1.0f, zOrder = z++))
+        val abxySpreadX = 0.065f
+        list.add(HudElement(id = "y", label = "Y (E)", key = "e", type = ElementType.BUTTON, xPct = abxyCx, yPct = abxyCy - abxySpreadY, scale = 1.0f, zOrder = z++, shape = ButtonShape.CIRCLE))
+        list.add(HudElement(id = "a", label = "A (SHIFT)", key = "shift", type = ElementType.BUTTON, xPct = abxyCx, yPct = abxyCy + abxySpreadY, scale = 1.0f, zOrder = z++, shape = ButtonShape.CIRCLE))
+        list.add(HudElement(id = "x", label = "X (SPACE)", key = "space", type = ElementType.BUTTON, xPct = abxyCx - abxySpreadX, yPct = abxyCy, scale = 1.0f, zOrder = z++, shape = ButtonShape.CIRCLE))
+        list.add(HudElement(id = "b", label = "B (R)", key = "r", type = ElementType.BUTTON, xPct = abxyCx + abxySpreadX, yPct = abxyCy, scale = 1.0f, zOrder = z++, shape = ButtonShape.CIRCLE))
 
         // Stick Click Buttons
-        list.add(HudElement(id = "lsb", label = "LSB (CTRL)", key = "ctrl", type = ElementType.BUTTON, xPct = 0.13f, yPct = 0.88f, scale = 1.0f, zOrder = z++))
-        list.add(HudElement(id = "rsb", label = "RSB (C)", key = "c", type = ElementType.BUTTON, xPct = 0.87f, yPct = 0.88f, scale = 1.0f, zOrder = z++))
+        list.add(HudElement(id = "lsb", label = "LSB (CTRL)", key = "ctrl", type = ElementType.BUTTON, xPct = 0.13f, yPct = 0.88f, scale = 1.0f, zOrder = z++, shape = ButtonShape.CIRCLE))
+        list.add(HudElement(id = "rsb", label = "RSB (C)", key = "c", type = ElementType.BUTTON, xPct = 0.87f, yPct = 0.88f, scale = 1.0f, zOrder = z++, shape = ButtonShape.CIRCLE))
 
         // Center System Buttons
-        list.add(HudElement(id = "small_icon", label = "ESC", key = "esc", type = ElementType.BUTTON, xPct = 0.45f, yPct = 0.93f, scale = 1.0f, zOrder = z++))
-        list.add(HudElement(id = "hamburger_icon", label = "B (MENU)", key = "b", type = ElementType.BUTTON, xPct = 0.55f, yPct = 0.93f, scale = 1.0f, zOrder = z++))
+        list.add(HudElement(id = "small_icon", label = "ESC", key = "esc", type = ElementType.BUTTON, xPct = 0.45f, yPct = 0.93f, scale = 1.0f, zOrder = z++, shape = ButtonShape.ROUNDED_RECT))
+        list.add(HudElement(id = "hamburger_icon", label = "B (MENU)", key = "b", type = ElementType.BUTTON, xPct = 0.55f, yPct = 0.93f, scale = 1.0f, zOrder = z++, shape = ButtonShape.ROUNDED_RECT))
 
         return list
     }
 
-    fun loadLayout(context: Context): MutableList<HudElement> {
+    fun getProfiles(context: Context): List<String> {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val jsonStr = prefs.getString(KEY_LAYOUT, null) ?: return getDefaultElements().toMutableList()
+        val str = prefs.getString(KEY_PROFILES_LIST, "Default,RDR2,FPS,Racing") ?: "Default,RDR2,FPS,Racing"
+        return str.split(",").map { it.trim() }.filter { it.isNotEmpty() }
+    }
+
+    fun getActiveProfile(context: Context): String {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.getString(KEY_ACTIVE_PROFILE, "Default") ?: "Default"
+    }
+
+    fun setActiveProfile(context: Context, name: String) {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        prefs.edit().putString(KEY_ACTIVE_PROFILE, name).apply()
+    }
+
+    fun addProfile(context: Context, name: String) {
+        val list = getProfiles(context).toMutableList()
+        if (!list.contains(name)) {
+            list.add(name)
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            prefs.edit().putString(KEY_PROFILES_LIST, list.joinToString(",")).apply()
+        }
+    }
+
+    fun deleteProfile(context: Context, name: String): Boolean {
+        val list = getProfiles(context).toMutableList()
+        if (list.size <= 1 || name == "Default") return false
+        list.remove(name)
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val active = getActiveProfile(context)
+        val newActive = if (active == name) "Default" else active
+        prefs.edit()
+            .putString(KEY_PROFILES_LIST, list.joinToString(","))
+            .putString(KEY_ACTIVE_PROFILE, newActive)
+            .remove("hud_layout_json_$name")
+            .apply()
+        return true
+    }
+
+    fun loadLayout(context: Context, profile: String = getActiveProfile(context)): MutableList<HudElement> {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val jsonStr = prefs.getString("hud_layout_json_$profile", null)
+            ?: prefs.getString("hud_layout_json", null)
+            ?: return getDefaultElements().toMutableList()
         return try {
             val array = JSONArray(jsonStr)
             val list = mutableListOf<HudElement>()
@@ -192,26 +264,27 @@ object HudConfig {
         }
     }
 
-    fun saveLayout(context: Context, elements: List<HudElement>) {
+    fun saveLayout(context: Context, elements: List<HudElement>, profile: String = getActiveProfile(context)) {
         val array = JSONArray()
         elements.forEach { array.put(it.toJson()) }
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
-            .putString(KEY_LAYOUT, array.toString())
+            .putString("hud_layout_json_$profile", array.toString())
+            .putString("hud_layout_json", array.toString())
             .apply()
     }
 
-    fun resetLayout(context: Context): List<HudElement> {
+    fun resetLayout(context: Context, profile: String = getActiveProfile(context)): List<HudElement> {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
-            .remove(KEY_LAYOUT)
+            .remove("hud_layout_json_$profile")
             .apply()
         return getDefaultElements()
     }
 
     /**
      * Extracts full keymap dictionary for the PC server:
-     * e.g. { "a": "shift", "lb": "tab", "custom_0": "m", ... }
+     * e.g. { "a": "shift", "lb": "tab", "dpad_up": "h", "dpad_down": "t", ... }
      */
     fun extractKeymap(elements: List<HudElement>): Map<String, String> {
         val map = mutableMapOf<String, String>()
@@ -219,8 +292,47 @@ object HudConfig {
             if (el.type == ElementType.BUTTON && el.key.isNotEmpty()) {
                 val targetKey = if (el.isCustom && el.customSlot >= 0) "custom_${el.customSlot}" else el.id
                 map[targetKey] = el.key
+            } else if (el.type == ElementType.DPAD) {
+                map["dpad_up"] = el.dpadUpKey
+                map["dpad_down"] = el.dpadDownKey
+                map["dpad_left"] = el.dpadLeftKey
+                map["dpad_right"] = el.dpadRightKey
             }
         }
         return map
+    }
+
+    // HUD Opacity
+    fun getHudOpacity(context: Context): Float {
+        return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getFloat(KEY_OPACITY, 1.0f)
+    }
+
+    fun setHudOpacity(context: Context, opacity: Float) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit().putFloat(KEY_OPACITY, opacity).apply()
+    }
+
+    // Gyroscope
+    fun isGyroEnabled(context: Context): Boolean {
+        return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getBoolean(KEY_GYRO_ENABLED, false)
+    }
+
+    fun setGyroEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit().putBoolean(KEY_GYRO_ENABLED, enabled).apply()
+    }
+
+    fun getGyroSensitivity(context: Context): Float {
+        return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getFloat(KEY_GYRO_SENSITIVITY, 1.5f)
+    }
+
+    fun setGyroSensitivity(context: Context, sens: Float) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit().putFloat(KEY_GYRO_SENSITIVITY, sens).apply()
+    }
+
+    fun isGyroAimOnly(context: Context): Boolean {
+        return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getBoolean(KEY_GYRO_AIM_ONLY, false)
+    }
+
+    fun setGyroAimOnly(context: Context, aimOnly: Boolean) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit().putBoolean(KEY_GYRO_AIM_ONLY, aimOnly).apply()
     }
 }

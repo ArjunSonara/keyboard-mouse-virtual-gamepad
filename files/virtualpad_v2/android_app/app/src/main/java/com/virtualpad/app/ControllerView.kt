@@ -15,13 +15,11 @@ import kotlin.math.min
 /**
  * Full-screen virtual pad supporting customizable HUD elements:
  * - Dynamic repositioning and scaling (0.5x .. 2.2x)
- * - Custom key binding per button
- * - Support for up to 16 extra custom buttons (custom_0 .. custom_15)
- * - Deterministic Z-order hit testing
+ * - Custom key binding per button and per D-Pad direction (Up, Down, Left, Right)
+ * - Custom button shapes: Circle, Square, and Pill / Rounded Rect
+ * - HUD Opacity adjustment (0.2x .. 1.0x)
+ * - Gyroscope motion injection
  * - Interactive Edit Mode with live visual feedback and selection
- *
- * Every touch event in gameplay mode calls onStateChanged immediately
- * for ultra-low latency event-driven transmission.
  */
 class ControllerView(context: Context, attrs: AttributeSet? = null) : View(context, attrs) {
 
@@ -100,6 +98,12 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
     val elements = mutableListOf<HudElement>()
     private var layoutReady = false
 
+    var hudOpacity: Float = 1.0f
+        set(value) {
+            field = value.coerceIn(0.2f, 1.0f)
+            invalidate()
+        }
+
     var isEditMode: Boolean = false
         set(value) {
             field = value
@@ -138,6 +142,7 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
         if (elements.isEmpty()) {
+            hudOpacity = HudConfig.getHudOpacity(context)
             elements.addAll(HudConfig.loadLayout(context))
         }
         layoutReady = true
@@ -154,6 +159,18 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
         val W = width.toFloat()
         val H = height.toFloat()
 
+        // Apply opacity modulation
+        val alphaMultiplier = if (isEditMode) 1.0f else hudOpacity
+        val alpha255 = (255 * alphaMultiplier).toInt().coerceIn(40, 255)
+        outlinePaint.alpha = alpha255
+        customOutlinePaint.alpha = alpha255
+        fillPaint.alpha = (180 * alphaMultiplier).toInt().coerceIn(30, 255)
+        fillActivePaint.alpha = 255
+        customFillPaint.alpha = (180 * alphaMultiplier).toInt().coerceIn(30, 255)
+        customFillActivePaint.alpha = 255
+        textPaint.alpha = alpha255
+        subTextPaint.alpha = (200 * alphaMultiplier).toInt().coerceIn(30, 255)
+
         // Swipe zone hint
         canvas.drawRect(W * 0.35f, 0f, W, H * 0.85f, swipeHintPaint)
 
@@ -162,7 +179,7 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
             drawEditModeGrid(canvas, W, H)
         }
 
-        // Draw elements in ascending zOrder (so higher zOrder is drawn on top)
+        // Draw elements in ascending zOrder (higher zOrder drawn on top)
         val sortedList = elements.sortedBy { it.zOrder }
         for (el in sortedList) {
             when (el.type) {
@@ -205,6 +222,13 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
         canvas.drawText(el.label.ifEmpty { "STICK" }, cx, cy + r * 0.85f, textPaint)
     }
 
+    private fun formatKeyDisplay(key: String): String = when (key.lowercase()) {
+        "mouse_left", "lmb" -> "LMB"
+        "mouse_right", "rmb" -> "RMB"
+        "mouse_middle", "mmb" -> "MMB"
+        else -> key.uppercase()
+    }
+
     private fun drawDpadElement(canvas: Canvas, el: HudElement, W: Float, H: Float) {
         val cx = el.xPct * W
         val cy = el.yPct * H
@@ -213,13 +237,14 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
         canvas.drawCircle(cx, cy, r, fillPaint)
         canvas.drawCircle(cx, cy, r, outlinePaint)
 
-        textPaint.textSize = min(W, H) * 0.032f * el.scale
-        canvas.drawText("H", cx, cy - r * 0.5f, textPaint)
-        canvas.drawText("T", cx, cy + r * 0.70f, textPaint)
-        canvas.drawText("X", cx - r * 0.6f, cy + 10f, textPaint)
-        canvas.drawText("X", cx + r * 0.6f, cy + 10f, textPaint)
+        textPaint.textSize = min(W, H) * 0.030f * el.scale
+        // Draw directional keys on each quadrant!
+        canvas.drawText(formatKeyDisplay(el.dpadUpKey), cx, cy - r * 0.5f, textPaint)
+        canvas.drawText(formatKeyDisplay(el.dpadDownKey), cx, cy + r * 0.70f, textPaint)
+        canvas.drawText(formatKeyDisplay(el.dpadLeftKey), cx - r * 0.6f, cy + 10f, textPaint)
+        canvas.drawText(formatKeyDisplay(el.dpadRightKey), cx + r * 0.6f, cy + 10f, textPaint)
 
-        subTextPaint.textSize = min(W, H) * 0.022f * el.scale
+        subTextPaint.textSize = min(W, H) * 0.020f * el.scale
         canvas.drawText("D-PAD", cx, cy + 8f, subTextPaint)
     }
 
@@ -228,7 +253,6 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
         val cy = el.yPct * H
         val active = isButtonActive(el)
 
-        val isRect = el.id in listOf("lb", "lt", "rb", "rt", "small_icon", "hamburger_icon")
         val currentFill = when {
             el.isCustom && active -> customFillActivePaint
             el.isCustom -> customFillPaint
@@ -237,24 +261,24 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
         }
         val currentOutline = if (el.isCustom) customOutlinePaint else outlinePaint
 
-        if (isRect) {
-            val rect = getButtonRect(el, cx, cy, W, H)
-            canvas.drawRoundRect(rect, 16f, 16f, currentFill)
-            canvas.drawRoundRect(rect, 16f, 16f, currentOutline)
-            drawButtonLabels(canvas, el, cx, cy, W, H)
-        } else {
-            val r = getButtonRadius(el, H)
-            canvas.drawCircle(cx, cy, r, currentFill)
-            canvas.drawCircle(cx, cy, r, currentOutline)
-            drawButtonLabels(canvas, el, cx, cy, W, H)
+        when (el.shape) {
+            ButtonShape.CIRCLE -> {
+                val r = getButtonRadius(el, H)
+                canvas.drawCircle(cx, cy, r, currentFill)
+                canvas.drawCircle(cx, cy, r, currentOutline)
+            }
+            ButtonShape.SQUARE -> {
+                val rect = getButtonSquare(el, cx, cy, H)
+                canvas.drawRoundRect(rect, 14f, 14f, currentFill)
+                canvas.drawRoundRect(rect, 14f, 14f, currentOutline)
+            }
+            ButtonShape.ROUNDED_RECT -> {
+                val rect = getButtonRect(el, cx, cy, W, H)
+                canvas.drawRoundRect(rect, 18f, 18f, currentFill)
+                canvas.drawRoundRect(rect, 18f, 18f, currentOutline)
+            }
         }
-    }
-
-    private fun formatKeyDisplay(key: String): String = when (key.lowercase()) {
-        "mouse_left", "lmb" -> "LMB"
-        "mouse_right", "rmb" -> "RMB"
-        "mouse_middle", "mmb" -> "MMB"
-        else -> key.uppercase()
+        drawButtonLabels(canvas, el, cx, cy, W, H)
     }
 
     private fun drawButtonLabels(canvas: Canvas, el: HudElement, cx: Float, cy: Float, W: Float, H: Float) {
@@ -269,7 +293,6 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
                 canvas.drawText("[$keyText]", cx, cy + 22f * el.scale, subTextPaint)
             }
         } else {
-            // Stock button label formatting
             canvas.drawText(el.label, cx, cy + 10f, textPaint)
         }
     }
@@ -288,13 +311,21 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
                 canvas.drawCircle(cx, cy, r, selectedOutlinePaint)
             }
             ElementType.BUTTON -> {
-                if (el.id in listOf("lb", "lt", "rb", "rt", "small_icon", "hamburger_icon")) {
-                    val rect = getButtonRect(el, cx, cy, W, H)
-                    rect.inset(-8f, -8f)
-                    canvas.drawRoundRect(rect, 20f, 20f, selectedOutlinePaint)
-                } else {
-                    val r = getButtonRadius(el, H) + 8f
-                    canvas.drawCircle(cx, cy, r, selectedOutlinePaint)
+                when (el.shape) {
+                    ButtonShape.CIRCLE -> {
+                        val r = getButtonRadius(el, H) + 8f
+                        canvas.drawCircle(cx, cy, r, selectedOutlinePaint)
+                    }
+                    ButtonShape.SQUARE -> {
+                        val rect = getButtonSquare(el, cx, cy, H)
+                        rect.inset(-8f, -8f)
+                        canvas.drawRoundRect(rect, 18f, 18f, selectedOutlinePaint)
+                    }
+                    ButtonShape.ROUNDED_RECT -> {
+                        val rect = getButtonRect(el, cx, cy, W, H)
+                        rect.inset(-8f, -8f)
+                        canvas.drawRoundRect(rect, 22f, 22f, selectedOutlinePaint)
+                    }
                 }
             }
         }
@@ -313,6 +344,11 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
 
     private fun getButtonRadius(el: HudElement, H: Float): Float = H * 0.075f * el.scale
 
+    private fun getButtonSquare(el: HudElement, cx: Float, cy: Float, H: Float): RectF {
+        val halfSide = H * 0.075f * el.scale
+        return RectF(cx - halfSide, cy - halfSide, cx + halfSide, cy + halfSide)
+    }
+
     private fun getButtonRect(el: HudElement, cx: Float, cy: Float, W: Float, H: Float): RectF {
         val isSystem = el.id in listOf("small_icon", "hamburger_icon")
         val halfW = (if (isSystem) W * 0.038f else W * 0.06f) * el.scale
@@ -326,7 +362,6 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
     fun findElementAt(x: Float, y: Float): HudElement? {
         val W = width.toFloat()
         val H = height.toFloat()
-        // Evaluate in descending zOrder (topmost first)
         val sortedList = elements.sortedByDescending { it.zOrder }
         for (el in sortedList) {
             val cx = el.xPct * W
@@ -341,12 +376,19 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
                     if (hypot(x - cx, y - cy) <= r) return el
                 }
                 ElementType.BUTTON -> {
-                    if (el.id in listOf("lb", "lt", "rb", "rt", "small_icon", "hamburger_icon")) {
-                        val rect = getButtonRect(el, cx, cy, W, H)
-                        if (rect.contains(x, y)) return el
-                    } else {
-                        val r = getButtonRadius(el, H)
-                        if (hypot(x - cx, y - cy) <= r) return el
+                    when (el.shape) {
+                        ButtonShape.CIRCLE -> {
+                            val r = getButtonRadius(el, H)
+                            if (hypot(x - cx, y - cy) <= r) return el
+                        }
+                        ButtonShape.SQUARE -> {
+                            val rect = getButtonSquare(el, cx, cy, H)
+                            if (rect.contains(x, y)) return el
+                        }
+                        ButtonShape.ROUNDED_RECT -> {
+                            val rect = getButtonRect(el, cx, cy, W, H)
+                            if (rect.contains(x, y)) return el
+                        }
                     }
                 }
             }
@@ -573,6 +615,15 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
             .withButton(Btn.DPAD_UP, angle in -135.0..-45.0)
     }
 
+    /**
+     * Injects motion from gyroscope into mouse look stream.
+     */
+    fun injectGyroAim(dx: Float, dy: Float) {
+        accumDx += dx
+        accumDy += dy
+        emitState()
+    }
+
     private fun emitState() {
         val sendDx = accumDx.toInt()
         val sendDy = accumDy.toInt()
@@ -611,8 +662,32 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
         }
     }
 
+    fun updateDpadDirectionKey(direction: String, newKey: String) {
+        selectedElement?.let { el ->
+            if (el.type == ElementType.DPAD) {
+                when (direction.lowercase()) {
+                    "up" -> el.dpadUpKey = newKey
+                    "down" -> el.dpadDownKey = newKey
+                    "left" -> el.dpadLeftKey = newKey
+                    "right" -> el.dpadRightKey = newKey
+                }
+                invalidate()
+                onLayoutChanged?.invoke()
+            }
+        }
+    }
+
+    fun updateSelectedShape(shape: ButtonShape) {
+        selectedElement?.let {
+            if (it.type == ElementType.BUTTON) {
+                it.shape = shape
+                invalidate()
+                onLayoutChanged?.invoke()
+            }
+        }
+    }
+
     fun addCustomButton(): HudElement? {
-        // Find next available customSlot in 0..15
         val usedSlots = elements.filter { it.isCustom }.map { it.customSlot }.toSet()
         val nextSlot = (0..15).firstOrNull { it !in usedSlots } ?: return null
 
@@ -627,7 +702,8 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
             scale = 1.0f,
             isCustom = true,
             customSlot = nextSlot,
-            zOrder = maxZ
+            zOrder = maxZ,
+            shape = ButtonShape.CIRCLE
         )
         elements.add(newEl)
         selectedElement = newEl
@@ -639,7 +715,7 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
 
     fun deleteSelectedElement(): Boolean {
         val current = selectedElement ?: return false
-        if (!current.isCustom) return false // Stock controls cannot be deleted
+        if (!current.isCustom) return false
 
         elements.remove(current)
         selectedElement = null
@@ -649,9 +725,18 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
         return true
     }
 
-    fun resetToDefault() {
+    fun resetToDefault(profileName: String = "Default") {
         elements.clear()
-        elements.addAll(HudConfig.resetLayout(context))
+        elements.addAll(HudConfig.resetLayout(context, profileName))
+        selectedElement = null
+        onElementSelected?.invoke(null)
+        onLayoutChanged?.invoke()
+        invalidate()
+    }
+
+    fun loadProfile(profileName: String) {
+        elements.clear()
+        elements.addAll(HudConfig.loadLayout(context, profileName))
         selectedElement = null
         onElementSelected?.invoke(null)
         onLayoutChanged?.invoke()
