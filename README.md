@@ -9,10 +9,11 @@ Unlike conventional virtual controllers that emulate an Xbox/ViGEmBus controller
 ## ⚡ Features
 
 - **True Keyboard & Mouse Input**: Every button translates into real low-level keyboard key holds via the **Interception driver**. The swipe zone translates directly into fluid relative mouse movement.
-- **Ultra-Low Latency USB Mode**: Transmits input over a physical USB cable using `adb reverse tcp:6001 tcp:6001` with `TCP_NODELAY` enabled. Transmission latency is **< 1 millisecond**.
-- **Wi-Fi Mode with QR Pairing**: Instant wireless pairing via QR code popup (or manual IP entry) using high-speed UDP.
+- **Customizable HUD & Key Binding**: Drag & reposition any button, D-pad, or joystick on your screen. Scale controls (0.5x to 2.2x), add up to 16 extra custom buttons, and assign any keyboard key or **Left/Right/Middle Mouse Clicks** directly inside the phone UI.
+- **Ultra-Low Latency USB Mode**: Transmits input over a physical USB cable using `adb reverse tcp:6001 tcp:6001` with `TCP_NODELAY` and length-prefixed stream framing. Transmission latency is **< 1 millisecond**.
+- **Wi-Fi Mode with QR Pairing**: Instant wireless pairing via QR code popup (or manual IP entry) using high-speed UDP with redundancy.
 - **Subpixel Mouse Look**: Smooth camera control with fractional accumulation and zero dropped micro-movements.
-- **Compact 9-Byte Binary Protocol**: Event-driven packet sending with minimal overhead.
+- **Compact 11-Byte Binary Protocol**: Event-driven packet sending with 32-bit bitmask and instant layout synchronization.
 
 ---
 

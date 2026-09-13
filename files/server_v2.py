@@ -10,6 +10,7 @@ TRANSPORT (both run at once, pick whichever in the phone app):
   - WiFi:  raw UDP on PORT, paired via a QR code shown in a popup window
   - USB:   TCP on PORT via `adb reverse tcp:PORT tcp:PORT`, phone app
            connects to 127.0.0.1:PORT - no WiFi involved at all
+           (Framed with 2-byte length prefix for robust stream separation)
 
 SETUP (one-time on the PC):
   1. Install the Interception driver (NOT just the pip package):
@@ -25,9 +26,10 @@ SETUP (one-time on the PC):
           adb reverse tcp:6001 tcp:6001
        and pick "USB" mode in the phone app - no IP/QR needed for this mode.
 
-KEYMAP: edit BUTTON_KEYMAP below to change what any button sends.
+KEYMAP: dynamic config received from Android HUD Customizer, or edit BUTTON_KEYMAP below.
 """
 
+import json
 import socket
 import struct
 import threading
@@ -63,13 +65,15 @@ PORT = 6001
 STICK_DEADZONE = 0.3  # fraction of full stick travel (0.0-1.0) to trigger WASD
 
 # Bit order MUST match the Android app's ControllerState.toBytes() exactly.
+# Bits 0..15: Stock buttons
+# Bits 16..31: Custom buttons (custom_0 .. custom_15)
 BUTTON_ORDER = [
     "lb", "rb", "lt", "rt",
     "y", "x", "b", "a",
     "lsb", "rsb",
     "dpad_up", "dpad_down", "dpad_left", "dpad_right",
     "small_icon", "hamburger_icon",
-]
+] + [f"custom_{i}" for i in range(16)]
 
 # Edit these to change what any button sends. Two buttons may share the
 # same key (e.g. dpad_left / dpad_right both send "x") - that's handled
@@ -93,17 +97,21 @@ BUTTON_KEYMAP = {
     "small_icon": "esc",
     "hamburger_icon": "b",
 }
+# Pre-populate custom buttons with defaults
+for i in range(16):
+    BUTTON_KEYMAP.setdefault(f"custom_{i}", "f")
 
-# Packet: <B H b b h h>  (little-endian)
+# Packet: <B I b b h h>  (little-endian, 11 bytes)
 #   B  = version/magic byte (0xAA), lets us ignore garbage packets
-#   H  = 16-bit button bitmask, bit order = BUTTON_ORDER above
+#   I  = 32-bit button bitmask, bit order = BUTTON_ORDER above
 #   b  = stick X, signed byte, -127..127 representing -1.0..1.0
 #   b  = stick Y, signed byte, -127..127 representing -1.0..1.0
 #   h  = mouse dx, signed 16-bit
 #   h  = mouse dy, signed 16-bit
-PACKET_FORMAT = "<BHbbhh"
-PACKET_SIZE = struct.calcsize(PACKET_FORMAT)
+PACKET_FORMAT = "<BIbbhh"
+PACKET_SIZE = struct.calcsize(PACKET_FORMAT)  # 11 bytes
 PACKET_MAGIC = 0xAA
+PACKET_MAGIC_CONFIG = 0xAC
 
 # ---------------------------------------------------------------------------
 # Interception init & mouse device discovery
@@ -175,15 +183,73 @@ _held_ctx = {}          # key_name -> active hold_key() context manager, or abse
 _key_sources = {}       # key_name -> set of source names currently requesting it
 
 
+MOUSE_BUTTON_MAP = {
+    "mouse_left": "left",
+    "lmb": "left",
+    "left_click": "left",
+    "click_left": "left",
+    "mouse_right": "right",
+    "rmb": "right",
+    "right_click": "right",
+    "click_right": "right",
+    "mouse_middle": "middle",
+    "mmb": "middle",
+    "middle_click": "middle",
+    "click_middle": "middle",
+}
+
+MOUSE_EVENT_FLAGS = {
+    "left": (0x0002, 0x0004),      # MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP
+    "right": (0x0008, 0x0010),     # MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP
+    "middle": (0x0020, 0x0040),    # MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP
+}
+
+
 def _actually_set_key(key: str, should_hold: bool):
     is_held = key in _held_ctx
-    if should_hold and not is_held:
-        ctx = interception.hold_key(key)
-        ctx.__enter__()
-        _held_ctx[key] = ctx
-    elif not should_hold and is_held:
-        _held_ctx[key].__exit__(None, None, None)
-        del _held_ctx[key]
+    mouse_btn = MOUSE_BUTTON_MAP.get(key.lower())
+
+    if mouse_btn:
+        down_flag, up_flag = MOUSE_EVENT_FLAGS[mouse_btn]
+        if should_hold and not is_held:
+            # 1. Zero-latency Windows mouse event
+            try:
+                ctypes.windll.user32.mouse_event(down_flag, 0, 0, 0, 0)
+            except Exception:
+                pass
+            # 2. Interception mouse hold
+            try:
+                ctx = interception.hold_mouse(mouse_btn)
+                ctx.__enter__()
+                _held_ctx[key] = ctx
+            except Exception:
+                _held_ctx[key] = True
+        elif not should_hold and is_held:
+            try:
+                ctypes.windll.user32.mouse_event(up_flag, 0, 0, 0, 0)
+            except Exception:
+                pass
+            ctx = _held_ctx.pop(key, None)
+            if ctx and ctx is not True:
+                try:
+                    ctx.__exit__(None, None, None)
+                except Exception:
+                    pass
+    else:
+        if should_hold and not is_held:
+            try:
+                ctx = interception.hold_key(key)
+                ctx.__enter__()
+                _held_ctx[key] = ctx
+            except Exception as e:
+                print(f"[Input] Warning: could not hold key '{key}': {e}")
+        elif not should_hold and is_held:
+            try:
+                _held_ctx[key].__exit__(None, None, None)
+            except Exception as e:
+                print(f"[Input] Warning: could not release key '{key}': {e}")
+            finally:
+                _held_ctx.pop(key, None)
 
 
 def request_key(key: str, source: str, pressed: bool):
@@ -208,6 +274,19 @@ _last_buttons = 0
 _last_stick_x = 0.0
 _last_stick_y = 0.0
 _state_lock = threading.Lock()
+
+
+def handle_config_packet(payload: bytes):
+    try:
+        # payload format: 1 byte magic (0xAC) + UTF-8 JSON keymap
+        json_str = payload[1:].decode("utf-8")
+        new_map = json.loads(json_str)
+        with _state_lock:
+            for btn_id, key_name in new_map.items():
+                BUTTON_KEYMAP[btn_id] = str(key_name).lower()
+        print(f"[Config] Dynamic keymap updated ({len(new_map)} keys): {new_map}")
+    except Exception as e:
+        print(f"[Config] Error parsing config packet: {e}")
 
 
 def apply_packet(buttons: int, stick_x: float, stick_y: float, mouse_dx: int, mouse_dy: int):
@@ -248,6 +327,16 @@ def handle_raw_packet(data: bytes):
     apply_packet(buttons, stick_x, stick_y, dx, dy)
 
 
+def dispatch_packet(data: bytes):
+    if not data:
+        return
+    magic = data[0]
+    if magic == PACKET_MAGIC:
+        handle_raw_packet(data)
+    elif magic == PACKET_MAGIC_CONFIG:
+        handle_config_packet(data)
+
+
 # ---------------------------------------------------------------------------
 # UDP (WiFi) listener
 # ---------------------------------------------------------------------------
@@ -258,8 +347,8 @@ def udp_listener():
     last_log = 0
     while True:
         try:
-            data, addr = sock.recvfrom(64)
-            handle_raw_packet(data)
+            data, addr = sock.recvfrom(2048)
+            dispatch_packet(data)
             if time.time() - last_log > 3:
                 print(f"[WiFi/UDP] receiving from {addr[0]}")
                 last_log = time.time()
@@ -268,7 +357,7 @@ def udp_listener():
 
 
 # ---------------------------------------------------------------------------
-# TCP (USB, via adb reverse) listener
+# TCP (USB, via adb reverse) listener with 2-byte length-prefixed framing
 # ---------------------------------------------------------------------------
 def tcp_listener():
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -281,16 +370,25 @@ def tcp_listener():
             conn, _ = sock.accept()
             conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             print("[USB/TCP] phone connected over USB")
-            buf = b""
+            buf = bytearray()
             while True:
-                chunk = conn.recv(256)
+                chunk = conn.recv(512)
                 if not chunk:
                     break
-                buf += chunk
-                while len(buf) >= PACKET_SIZE:
-                    handle_raw_packet(buf[:PACKET_SIZE])
-                    buf = buf[PACKET_SIZE:]
-        except Exception:
+                buf.extend(chunk)
+                # Frame format: 2-byte little endian unsigned short (length) + payload
+                while len(buf) >= 2:
+                    packet_len = struct.unpack("<H", buf[:2])[0]
+                    if len(buf) < 2 + packet_len:
+                        break  # Wait for remaining packet payload to arrive
+                    payload = bytes(buf[2 : 2 + packet_len])
+                    del buf[: 2 + packet_len]
+                    dispatch_packet(payload)
+            print("[USB/TCP] phone disconnected")
+            release_everything()
+        except Exception as e:
+            print(f"[USB/TCP] connection error: {e}")
+            release_everything()
             continue
 
 
@@ -390,7 +488,7 @@ def show_qr_popup(ip: str, port: int):
 def main():
     ip, adapters = get_local_ip()
     print("=" * 60)
-    print("Virtual Pad server starting")
+    print("Virtual Pad server starting (HUD Customizer & 32-bit Bitmask Ready)")
     print(f"  WiFi pairing info : {ip}:{PORT}")
     for name, aip in adapters.items():
         if aip != ip and not any(x in name.lower() for x in ["warp", "virtual"]):
