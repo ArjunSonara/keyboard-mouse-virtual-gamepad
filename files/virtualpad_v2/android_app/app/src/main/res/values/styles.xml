@@ -1,0 +1,11 @@
+<resources>
+    <style name="Theme.VirtualPad" parent="android:Theme.Material.NoActionBar">
+        <item name="android:colorBackground">#0A0E1A</item>
+    </style>
+
+    <style name="Theme.VirtualPad.Fullscreen">
+        <item name="android:windowFullscreen">true</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowActionBar">false</item>
+    </style>
+</resources>

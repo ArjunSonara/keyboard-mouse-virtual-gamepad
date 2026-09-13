@@ -1,0 +1,2 @@
+interception-python
+qrcode[pil]

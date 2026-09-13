@@ -1,0 +1,22 @@
+# Gradle & Android
+*.iml
+.gradle/
+local.properties
+.idea/
+.DS_Store
+**/build/
+build/
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+
+# Windows
+Thumbs.db
+desktop.ini
