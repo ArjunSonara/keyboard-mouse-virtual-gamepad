@@ -7,6 +7,7 @@ import java.net.InetAddress
 import java.net.Socket
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
 const val PACKET_MAGIC: Byte = 0xAA.toByte()
@@ -77,6 +78,9 @@ class NetworkClient {
     private var tcpSocket: Socket? = null
     private var tcpOut: OutputStream? = null
 
+    private val sendExecutor = Executors.newSingleThreadExecutor()
+    @Volatile private var targetAddress: InetAddress? = null
+
     private var lastSent = ControllerState()
     private val running = AtomicBoolean(false)
     private var heartbeatThread: Thread? = null
@@ -106,6 +110,13 @@ class NetworkClient {
     fun setWifiTarget(host: String, port: Int = DEFAULT_PORT) {
         this.wifiHost = host
         this.port = port
+        sendExecutor.execute {
+            try {
+                targetAddress = InetAddress.getByName(host)
+            } catch (_: Exception) {
+                targetAddress = null
+            }
+        }
     }
 
     fun start() {
@@ -130,9 +141,10 @@ class NetworkClient {
         running.set(false)
         heartbeatThread?.interrupt()
         disconnectUsb()
+        try { sendExecutor.shutdownNow() } catch (_: Exception) {}
     }
 
-    /** Event-driven: call this every time touch input changes. Sends immediately. */
+    /** Event-driven: call this every time touch input changes. Sends immediately off-thread. */
     fun submit(state: ControllerState) {
         val changed = state.buttons != lastSent.buttons ||
             state.stickX != lastSent.stickX ||
@@ -140,10 +152,13 @@ class NetworkClient {
         val hasMouseMotion = state.mouseDx != 0 || state.mouseDy != 0
 
         if (changed || hasMouseMotion) {
-            try {
-                sendRaw(state.toBytes())
-            } catch (_: Exception) {
-                // ignore - heartbeat/next event will retry
+            val bytes = state.toBytes()
+            sendExecutor.execute {
+                try {
+                    sendRaw(bytes)
+                } catch (_: Exception) {
+                    // ignore - heartbeat/next event will retry
+                }
             }
             // mouse delta is one-shot; don't let the heartbeat replay it
             lastSent = state.copy(mouseDx = 0, mouseDy = 0)
@@ -154,7 +169,11 @@ class NetworkClient {
         when (mode) {
             TransportMode.WIFI -> {
                 if (wifiHost.isEmpty()) return
-                val addr = InetAddress.getByName(wifiHost)
+                var addr = targetAddress
+                if (addr == null) {
+                    addr = InetAddress.getByName(wifiHost)
+                    targetAddress = addr
+                }
                 udpSocket.send(DatagramPacket(bytes, bytes.size, addr, port))
             }
             TransportMode.USB -> {

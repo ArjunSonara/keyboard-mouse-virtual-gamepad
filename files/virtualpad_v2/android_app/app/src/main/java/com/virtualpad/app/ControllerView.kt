@@ -61,8 +61,9 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
     private var lookPointerId: Int? = null
     private var lastLookX = 0f
     private var lastLookY = 0f
-    private var accumDx = 0
-    private var accumDy = 0
+    private var accumDx = 0f
+    private var accumDy = 0f
+    var mouseSensitivity = 1.75f
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
@@ -194,10 +195,11 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
             inRect(smallIconZone, x, y) -> setButton(id, "small_icon", Btn.SMALL_ICON, true)
             inRect(hamburgerZone, x, y) -> setButton(id, "hamburger_icon", Btn.HAMBURGER_ICON, true)
             else -> {
-                if (lookPointerId == null) {
+                if (lookPointerId == null && x >= width * 0.30f) {
                     lookPointerId = id
                     pointerZone[id] = "look"
-                    lastLookX = x; lastLookY = y
+                    lastLookX = x
+                    lastLookY = y
                 }
             }
         }
@@ -213,9 +215,12 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
             "leftstick" -> updateLeftStick(x, y)
             "dpad" -> updateDpad(x, y)
             "look" -> {
-                accumDx += (x - lastLookX).toInt()
-                accumDy += (y - lastLookY).toInt()
-                lastLookX = x; lastLookY = y
+                val dx = (x - lastLookX) * mouseSensitivity
+                val dy = (y - lastLookY) * mouseSensitivity
+                accumDx += dx
+                accumDy += dy
+                lastLookX = x
+                lastLookY = y
             }
         }
     }
@@ -226,7 +231,11 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
             "dpad" -> state = state
                 .withButton(Btn.DPAD_UP, false).withButton(Btn.DPAD_DOWN, false)
                 .withButton(Btn.DPAD_LEFT, false).withButton(Btn.DPAD_RIGHT, false)
-            "look" -> lookPointerId = null
+            "look" -> {
+                lookPointerId = null
+                accumDx = 0f
+                accumDy = 0f
+            }
             "lb" -> state = state.withButton(Btn.LB, false)
             "rb" -> state = state.withButton(Btn.RB, false)
             "lt" -> state = state.withButton(Btn.LT, false)
@@ -272,8 +281,11 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
     }
 
     private fun emitState() {
-        val out = state.copy(mouseDx = accumDx, mouseDy = accumDy)
-        accumDx = 0; accumDy = 0
+        val sendDx = accumDx.toInt()
+        val sendDy = accumDy.toInt()
+        accumDx -= sendDx.toFloat()
+        accumDy -= sendDy.toFloat()
+        val out = state.copy(mouseDx = sendDx, mouseDy = sendDy)
         onStateChanged?.invoke(out)
     }
 }

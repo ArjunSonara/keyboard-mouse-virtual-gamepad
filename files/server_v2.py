@@ -33,6 +33,7 @@ import struct
 import threading
 import time
 import sys
+import ctypes
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(line_buffering=True)
@@ -105,10 +106,28 @@ PACKET_SIZE = struct.calcsize(PACKET_FORMAT)
 PACKET_MAGIC = 0xAA
 
 # ---------------------------------------------------------------------------
-# Interception init
+# Interception init & mouse device discovery
 # ---------------------------------------------------------------------------
+_interception_ctx = None
+_mouse_devices = []
+
 try:
     interception.auto_capture_devices(keyboard=True, mouse=True)
+    _interception_ctx = interception.inputs._g_context
+    # Prioritize physical USB mouse or Touchpad over generic Bluetooth profile
+    for dev in range(10, 20):
+        if _interception_ctx.is_mouse(dev):
+            hwid = _interception_ctx.devices[dev].get_HWID()
+            if hwid:
+                _mouse_devices.append(dev)
+    for dev in _mouse_devices:
+        hwid = _interception_ctx.devices[dev].get_HWID() or ""
+        if "VID_" in hwid and "{00001124" not in hwid:
+            _interception_ctx.mouse = dev
+            break
+        elif any(k in hwid.upper() for k in ["ELAN", "SYNAPTICS"]):
+            _interception_ctx.mouse = dev
+            break
 except Exception as e:
     raise SystemExit(
         "Could not initialize the Interception driver. Make sure you:\n"
@@ -119,11 +138,33 @@ except Exception as e:
         f"Underlying error: {e}"
     )
 
+_mouse_move_count = 0
+
 
 def move_mouse_relative(dx: int, dy: int):
+    global _mouse_move_count
     if dx == 0 and dy == 0:
         return
-    interception.move_relative(dx, dy)
+
+    _mouse_move_count += 1
+    if _mouse_move_count == 1 or _mouse_move_count % 100 == 0:
+        print(f"[Input] Mouse motion: dx={dx}, dy={dy} (events: {_mouse_move_count})")
+
+    # 1. Primary zero-latency Windows relative mouse event (game & desktop compatible)
+    try:
+        ctypes.windll.user32.mouse_event(0x0001, int(dx), int(dy), 0, 0)
+    except Exception:
+        pass
+
+    # 2. Also forward raw stroke through Interception driver if device is available
+    if _interception_ctx and _interception_ctx.mouse:
+        try:
+            stroke = interception.MouseStroke(
+                interception.MouseFlag.MOUSE_MOVE_RELATIVE, 0, 0, int(dx), int(dy)
+            )
+            _interception_ctx.send(_interception_ctx.mouse, stroke)
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
