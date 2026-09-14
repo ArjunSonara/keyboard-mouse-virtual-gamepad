@@ -11,8 +11,10 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
+import android.os.Build
 import android.os.Bundle
 import android.view.Gravity
+import android.view.Surface
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
@@ -20,6 +22,9 @@ import android.widget.Button
 import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.FrameLayout
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.RadioButton
 import android.widget.RadioGroup
@@ -32,6 +37,8 @@ import androidx.core.content.ContextCompat
 import com.google.zxing.integration.android.IntentIntegrator
 import com.google.zxing.integration.android.IntentResult
 import kotlin.math.abs
+
+data class RecordedInputEvent(val key: String, val isDown: Boolean, val timestampMs: Long)
 
 class MainActivity : Activity(), SensorEventListener {
 
@@ -49,12 +56,21 @@ class MainActivity : Activity(), SensorEventListener {
     private lateinit var bindKeyButton: Button
     private lateinit var shapeButton: Button
     private lateinit var deleteButton: Button
+    private lateinit var modeButton: Button
+    private lateinit var turboCpsButton: Button
+    private lateinit var macroButton: Button
     private lateinit var dpadControlsRow: LinearLayout
     private lateinit var dpadUpBtn: Button
     private lateinit var dpadDownBtn: Button
     private lateinit var dpadLeftBtn: Button
     private lateinit var dpadRightBtn: Button
     private lateinit var buttonControlsRow: LinearLayout
+
+    // Macro Studio & Live Recording
+    private var liveRecordingTarget: HudElement? = null
+    private val recordedEvents = mutableListOf<RecordedInputEvent>()
+    private lateinit var recordingBanner: LinearLayout
+    private var recTitleText: TextView? = null
 
     // Sensor / Gyroscope
     private var sensorManager: SensorManager? = null
@@ -98,6 +114,15 @@ class MainActivity : Activity(), SensorEventListener {
         controllerView = ControllerView(this)
         controllerView.hudOpacity = HudConfig.getHudOpacity(this)
         controllerView.onStateChanged = { state -> networkClient.submit(state) }
+        controllerView.onWheelScroll = { delta -> networkClient.sendScrollWheel(delta) }
+        controllerView.onMacroKeyRequested = { key, pressed -> networkClient.sendMacroKey(key, pressed) }
+        controllerView.onMacroEventRecorded = { key, isDown, timeMs ->
+            recordedEvents.add(RecordedInputEvent(key, isDown, timeMs))
+            if (isDown) {
+                val count = recordedEvents.count { it.isDown }
+                recTitleText?.text = "🔴 RECORDING ($count taps) | Last: ${key.uppercase()} | Tap buttons..."
+            }
+        }
         root.addView(
             controllerView,
             FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
@@ -123,6 +148,9 @@ class MainActivity : Activity(), SensorEventListener {
         // 3. Edit Mode Overlay
         buildEditOverlay(root)
 
+        // 4. Floating Live Recording Banner
+        buildRecordingBanner(root)
+
         setContentView(root)
         networkClient.start()
 
@@ -144,21 +172,79 @@ class MainActivity : Activity(), SensorEventListener {
     // -------------------------------------------------------------------
     // Gyroscope Motion Aiming
     // -------------------------------------------------------------------
+    private var smoothedGyroDx = 0f
+    private var smoothedGyroDy = 0f
+
     override fun onSensorChanged(event: SensorEvent?) {
         if (event == null || event.sensor.type != Sensor.TYPE_GYROSCOPE) return
         if (!gyroActive || controllerView.isEditMode) return
 
-        val wx = event.values[0] // Angular speed around X (pitch)
-        val wy = event.values[1] // Angular speed around Y (yaw)
+        // If Aim-Only is enabled, only engage gyro when touching look pad or holding aim buttons
+        if (HudConfig.isGyroAimOnly(this) && !controllerView.isAimActive()) {
+            smoothedGyroDx = 0f
+            smoothedGyroDy = 0f
+            return
+        }
 
-        // Noise deadzone filter
-        if (abs(wx) < 0.02f && abs(wy) < 0.02f) return
+        val displayRotation = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            display?.rotation ?: Surface.ROTATION_90
+        } else {
+            @Suppress("DEPRECATION")
+            windowManager.defaultDisplay.rotation
+        }
+        val isRot270 = displayRotation == Surface.ROTATION_270
 
-        val sens = HudConfig.getGyroSensitivity(this) * 14.0f
-        val dx = -wy * sens
-        val dy = -wx * sens
+        var rawWx = event.values[0]
+        var rawWy = event.values[1]
+        val rawWz = event.values[2]
 
-        controllerView.injectGyroAim(dx, dy)
+        if (isRot270) {
+            rawWx = -rawWx
+            rawWy = -rawWy
+        }
+
+        // Noise deadzone filter (eliminate resting drift / hand tremors)
+        val deadzone = 0.015f
+        val wx = if (abs(rawWx) < deadzone) 0f else rawWx - kotlin.math.sign(rawWx) * deadzone
+        val wy = if (abs(rawWy) < deadzone) 0f else rawWy - kotlin.math.sign(rawWy) * deadzone
+        val wz = if (abs(rawWz) < deadzone) 0f else rawWz - kotlin.math.sign(rawWz) * deadzone
+
+        if (wx == 0f && wy == 0f && wz == 0f) {
+            smoothedGyroDx *= 0.5f
+            smoothedGyroDy *= 0.5f
+            if (abs(smoothedGyroDx) > 0.05f || abs(smoothedGyroDy) > 0.05f) {
+                controllerView.injectGyroAim(smoothedGyroDx, smoothedGyroDy)
+            }
+            return
+        }
+
+        val sensX = HudConfig.getGyroSensX(this) * 15.0f
+        val sensY = HudConfig.getGyroSensY(this) * 15.0f
+
+        // Correct Landscape Mapping:
+        // Horizontal aim (turn left/right) combines swivel (wx) and steering wheel roll (-wz)
+        var targetDx = (wx - wz * 0.75f) * sensX
+
+        // Vertical aim (tilt up/down) is driven by screen pitch (wy)
+        var targetDy = -wy * sensY
+
+        // Filter by selected Axis Mode (Full 2D vs Horizontal Only vs Vertical Only)
+        val axisMode = HudConfig.getGyroAxisMode(this)
+        if (axisMode == HudConfig.GYRO_AXIS_HORIZONTAL_ONLY) {
+            targetDy = 0f
+        } else if (axisMode == HudConfig.GYRO_AXIS_VERTICAL_ONLY) {
+            targetDx = 0f
+        }
+
+        if (HudConfig.isGyroInvertX(this)) targetDx = -targetDx
+        if (HudConfig.isGyroInvertY(this)) targetDy = -targetDy
+
+        // Low-pass exponential smoothing filter
+        val alpha = HudConfig.getGyroSmoothing(this).coerceIn(0.2f, 0.95f)
+        smoothedGyroDx = alpha * targetDx + (1f - alpha) * smoothedGyroDx
+        smoothedGyroDy = alpha * targetDy + (1f - alpha) * smoothedGyroDy
+
+        controllerView.injectGyroAim(smoothedGyroDx, smoothedGyroDy)
     }
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
@@ -269,6 +355,100 @@ class MainActivity : Activity(), SensorEventListener {
         profileRow.addView(newProfileBtn, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT))
         layout.addView(profileRow)
 
+        // Row: Share / Export & Import Layout as JSON
+        val jsonShareRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, 0, 0, 16)
+        }
+        val exportJsonBtn = Button(this).apply {
+            text = "📋 Export / Share JSON"
+            textSize = 12f
+            setTextColor(Color.WHITE)
+            background = createCardDrawable(Color.parseColor("#1F6FEB"), 12f)
+            setPadding(16, 8, 16, 8)
+            setOnClickListener {
+                val json = HudConfig.exportLayoutJson(controllerView.elements)
+                val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                val clip = android.content.ClipData.newPlainText("VirtualPad HUD", json)
+                clipboard.setPrimaryClip(clip)
+
+                val showBox = EditText(this@MainActivity).apply {
+                    setText(json)
+                    isFocusable = false
+                    textSize = 11f
+                    setPadding(16, 16, 16, 16)
+                }
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle("📋 HUD Layout JSON (Copied!)")
+                    .setMessage("The HUD layout JSON has been copied to your clipboard. You can paste and share it with anyone!")
+                    .setView(showBox)
+                    .setPositiveButton("OK", null)
+                    .show()
+            }
+        }
+        jsonShareRow.addView(exportJsonBtn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = 8 })
+
+        val importJsonBtn = Button(this).apply {
+            text = "📥 Import / Paste JSON"
+            textSize = 12f
+            setTextColor(Color.WHITE)
+            background = createCardDrawable(Color.parseColor("#238636"), 12f)
+            setPadding(16, 8, 16, 8)
+            setOnClickListener {
+                val input = EditText(this@MainActivity).apply {
+                    hint = "Paste HUD layout JSON here..."
+                    minLines = 4
+                    textSize = 12f
+                    setPadding(16, 16, 16, 16)
+                }
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle("📥 Import HUD Layout")
+                    .setMessage("Paste someone's HUD layout JSON below to load their controls:")
+                    .setView(input)
+                    .setPositiveButton("Import") { _, _ ->
+                        val text = input.text.toString().trim()
+                        val imported = HudConfig.importLayoutJson(text)
+                        if (imported != null && imported.isNotEmpty()) {
+                            controllerView.elements.clear()
+                            controllerView.elements.addAll(imported)
+                            val active = HudConfig.getActiveProfile(this@MainActivity)
+                            HudConfig.saveLayout(this@MainActivity, imported, active)
+                            val keymap = HudConfig.extractKeymap(imported)
+                            networkClient.sendKeymapSync(keymap)
+                            controllerView.invalidate()
+                            Toast.makeText(this@MainActivity, "✅ HUD Layout imported successfully!", Toast.LENGTH_LONG).show()
+                        } else {
+                            Toast.makeText(this@MainActivity, "❌ Invalid HUD JSON format", Toast.LENGTH_LONG).show()
+                        }
+                    }
+                    .setNeutralButton("Paste from Clipboard") { _, _ ->
+                        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                        val clip = clipboard.primaryClip
+                        if (clip != null && clip.itemCount > 0) {
+                            val pasteText = clip.getItemAt(0).text.toString()
+                            val imported = HudConfig.importLayoutJson(pasteText)
+                            if (imported != null && imported.isNotEmpty()) {
+                                controllerView.elements.clear()
+                                controllerView.elements.addAll(imported)
+                                val active = HudConfig.getActiveProfile(this@MainActivity)
+                                HudConfig.saveLayout(this@MainActivity, imported, active)
+                                val keymap = HudConfig.extractKeymap(imported)
+                                networkClient.sendKeymapSync(keymap)
+                                controllerView.invalidate()
+                                Toast.makeText(this@MainActivity, "✅ HUD Layout pasted and loaded!", Toast.LENGTH_LONG).show()
+                            } else {
+                                Toast.makeText(this@MainActivity, "❌ Clipboard does not contain valid HUD JSON", Toast.LENGTH_LONG).show()
+                            }
+                        }
+                    }
+                    .setNegativeButton("Cancel", null)
+                    .show()
+            }
+        }
+        jsonShareRow.addView(importJsonBtn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        layout.addView(jsonShareRow)
+
         // Section: HUD Opacity Slider
         val opacityLabel = TextView(this).apply {
             text = "HUD Opacity: ${(controllerView.hudOpacity * 100).toInt()}%"
@@ -320,6 +500,15 @@ class MainActivity : Activity(), SensorEventListener {
         layout.addView(sensBar)
 
         // Section: Gyroscope Aiming
+        val gyroTitle = TextView(this).apply {
+            text = "🎯 Gyroscope Motion Aiming"
+            setTextColor(Color.parseColor("#58A6FF"))
+            textSize = 14f
+            paint.isFakeBoldText = true
+            setPadding(0, 16, 0, 4)
+        }
+        layout.addView(gyroTitle)
+
         val gyroCheck = CheckBox(this).apply {
             text = "Enable Gyroscope Motion Aiming"
             setTextColor(Color.WHITE)
@@ -332,28 +521,224 @@ class MainActivity : Activity(), SensorEventListener {
         }
         layout.addView(gyroCheck)
 
-        val gyroSensLabel = TextView(this).apply {
-            text = "Gyro Sensitivity: ${String.format("%.1f", HudConfig.getGyroSensitivity(this@MainActivity))}x"
+        // Gyro Active Axes Selector (Full 2D vs Horizontal Only vs Vertical Only)
+        val axisLabel = TextView(this).apply {
+            text = "Gyro Motion Axis Mode:"
+            setTextColor(Color.parseColor("#8B949E"))
+            textSize = 12f
+            setPadding(0, 8, 0, 2)
+        }
+        layout.addView(axisLabel)
+
+        val axisRadioGroup = RadioGroup(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        val rbFull = RadioButton(this).apply {
+            text = "Full 2D (Both Horizontal & Vertical Aim)"
+            setTextColor(Color.WHITE)
+            textSize = 12f
+            id = View.generateViewId()
+        }
+        val rbHoriz = RadioButton(this).apply {
+            text = "Horizontal Only (Yaw / Left & Right Aim Only)"
+            setTextColor(Color.WHITE)
+            textSize = 12f
+            id = View.generateViewId()
+        }
+        val rbVert = RadioButton(this).apply {
+            text = "Vertical Only (Pitch / Up & Down Aim Only)"
+            setTextColor(Color.WHITE)
+            textSize = 12f
+            id = View.generateViewId()
+        }
+        axisRadioGroup.addView(rbFull)
+        axisRadioGroup.addView(rbHoriz)
+        axisRadioGroup.addView(rbVert)
+
+        when (HudConfig.getGyroAxisMode(this@MainActivity)) {
+            HudConfig.GYRO_AXIS_HORIZONTAL_ONLY -> axisRadioGroup.check(rbHoriz.id)
+            HudConfig.GYRO_AXIS_VERTICAL_ONLY -> axisRadioGroup.check(rbVert.id)
+            else -> axisRadioGroup.check(rbFull.id)
+        }
+
+        axisRadioGroup.setOnCheckedChangeListener { _, checkedId ->
+            val mode = when (checkedId) {
+                rbHoriz.id -> HudConfig.GYRO_AXIS_HORIZONTAL_ONLY
+                rbVert.id -> HudConfig.GYRO_AXIS_VERTICAL_ONLY
+                else -> HudConfig.GYRO_AXIS_FULL
+            }
+            HudConfig.setGyroAxisMode(this@MainActivity, mode)
+        }
+        layout.addView(axisRadioGroup)
+
+        val gyroAimOnlyCheck = CheckBox(this).apply {
+            text = "Aim-Only Ratchet (Active while aiming / holding LT)"
+            setTextColor(Color.parseColor("#E6EDF3"))
+            textSize = 12f
+            isChecked = HudConfig.isGyroAimOnly(this@MainActivity)
+            setOnCheckedChangeListener { _, isChecked ->
+                HudConfig.setGyroAimOnly(this@MainActivity, isChecked)
+            }
+        }
+        layout.addView(gyroAimOnlyCheck)
+
+        // Gyro Inversion Checkboxes Row
+        val invertRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, 4, 0, 4)
+        }
+        val invertXCheck = CheckBox(this).apply {
+            text = "Invert Horizontal"
+            setTextColor(Color.parseColor("#8B949E"))
+            textSize = 12f
+            isChecked = HudConfig.isGyroInvertX(this@MainActivity)
+            setOnCheckedChangeListener { _, isChecked ->
+                HudConfig.setGyroInvertX(this@MainActivity, isChecked)
+            }
+        }
+        val invertYCheck = CheckBox(this).apply {
+            text = "Invert Vertical"
+            setTextColor(Color.parseColor("#8B949E"))
+            textSize = 12f
+            isChecked = HudConfig.isGyroInvertY(this@MainActivity)
+            setOnCheckedChangeListener { _, isChecked ->
+                HudConfig.setGyroInvertY(this@MainActivity, isChecked)
+            }
+        }
+        invertRow.addView(invertXCheck, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        invertRow.addView(invertYCheck, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        layout.addView(invertRow)
+
+        val sensXLabel = TextView(this).apply {
+            text = "↔️ Gyro Horizontal Sensitivity (Yaw): ${String.format("%.1f", HudConfig.getGyroSensX(this@MainActivity))}x"
             setTextColor(Color.WHITE)
             textSize = 13f
             setPadding(0, 8, 0, 4)
         }
-        layout.addView(gyroSensLabel)
+        layout.addView(sensXLabel)
 
-        val gyroSensBar = SeekBar(this).apply {
-            max = 300
-            progress = (HudConfig.getGyroSensitivity(this@MainActivity) * 100).toInt()
+        val sensXBar = SeekBar(this).apply {
+            max = 370
+            progress = ((HudConfig.getGyroSensX(this@MainActivity) - 0.30f) * 100).toInt().coerceAtLeast(0)
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
-                    val sens = progress.coerceAtLeast(50) / 100f
-                    gyroSensLabel.text = "Gyro Sensitivity: ${String.format("%.1f", sens)}x"
-                    HudConfig.setGyroSensitivity(this@MainActivity, sens)
+                    val sens = progress / 100f + 0.30f
+                    sensXLabel.text = "↔️ Gyro Horizontal Sensitivity (Yaw): ${String.format("%.1f", sens)}x"
+                    HudConfig.setGyroSensX(this@MainActivity, sens)
                 }
                 override fun onStartTrackingTouch(seekBar: SeekBar?) {}
                 override fun onStopTrackingTouch(seekBar: SeekBar?) {}
             })
         }
-        layout.addView(gyroSensBar)
+        layout.addView(sensXBar)
+
+        val sensYLabel = TextView(this).apply {
+            text = "↕️ Gyro Vertical Sensitivity (Pitch): ${String.format("%.1f", HudConfig.getGyroSensY(this@MainActivity))}x"
+            setTextColor(Color.WHITE)
+            textSize = 13f
+            setPadding(0, 8, 0, 4)
+        }
+        layout.addView(sensYLabel)
+
+        val sensYBar = SeekBar(this).apply {
+            max = 370
+            progress = ((HudConfig.getGyroSensY(this@MainActivity) - 0.30f) * 100).toInt().coerceAtLeast(0)
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                    val sens = progress / 100f + 0.30f
+                    sensYLabel.text = "↕️ Gyro Vertical Sensitivity (Pitch): ${String.format("%.1f", sens)}x"
+                    HudConfig.setGyroSensY(this@MainActivity, sens)
+                }
+                override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+                override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+            })
+        }
+        layout.addView(sensYBar)
+
+        val gyroSmoothLabel = TextView(this).apply {
+            val sm = (HudConfig.getGyroSmoothing(this@MainActivity) * 100).toInt()
+            text = "Gyro Smoothing: $sm% (Low Jitter)"
+            setTextColor(Color.WHITE)
+            textSize = 13f
+            setPadding(0, 8, 0, 4)
+        }
+        layout.addView(gyroSmoothLabel)
+
+        val gyroSmoothBar = SeekBar(this).apply {
+            max = 95
+            progress = (HudConfig.getGyroSmoothing(this@MainActivity) * 100).toInt()
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                    val sm = progress.coerceAtLeast(20) / 100f
+                    gyroSmoothLabel.text = "Gyro Smoothing: ${(sm * 100).toInt()}% (Low Jitter)"
+                    HudConfig.setGyroSmoothing(this@MainActivity, sm)
+                }
+                override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+                override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+            })
+        }
+        layout.addView(gyroSmoothBar)
+
+        // Section: High-End Tactile Haptic Feedback
+        val hapticTitle = TextView(this).apply {
+            text = "🎮 Tactile Haptic Feedback"
+            setTextColor(Color.parseColor("#3FB950"))
+            textSize = 14f
+            paint.isFakeBoldText = true
+            setPadding(0, 16, 0, 4)
+        }
+        layout.addView(hapticTitle)
+
+        val hapticCheck = CheckBox(this).apply {
+            text = "Enable Tactile Haptics (Buttons, Triggers, D-Pad, Boundary)"
+            setTextColor(Color.WHITE)
+            textSize = 13f
+            isChecked = HudConfig.isHapticEnabled(this@MainActivity)
+            setOnCheckedChangeListener { _, isChecked ->
+                HudConfig.setHapticEnabled(this@MainActivity, isChecked)
+            }
+        }
+        layout.addView(hapticCheck)
+
+        val hapticIntensityLabel = TextView(this).apply {
+            text = "Haptic Strength: ${(HudConfig.getHapticIntensity(this@MainActivity) * 100).toInt()}%"
+            setTextColor(Color.WHITE)
+            textSize = 13f
+            setPadding(0, 8, 0, 4)
+        }
+        layout.addView(hapticIntensityLabel)
+
+        val hapticIntensityBar = SeekBar(this).apply {
+            max = 100
+            progress = (HudConfig.getHapticIntensity(this@MainActivity) * 100).toInt()
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                    val intensity = progress.coerceAtLeast(10) / 100f
+                    hapticIntensityLabel.text = "Haptic Strength: ${(intensity * 100).toInt()}%"
+                    HudConfig.setHapticIntensity(this@MainActivity, intensity)
+                }
+                override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+                override fun onStopTrackingTouch(seekBar: SeekBar?) {
+                    controllerView.hapticHelper.heavyClick()
+                }
+            })
+        }
+        layout.addView(hapticIntensityBar)
+
+        val testHapticBtn = Button(this).apply {
+            text = "⚡ Test Haptic Feedback"
+            textSize = 12f
+            setTextColor(Color.WHITE)
+            background = createCardDrawable(Color.parseColor("#238636"), 12f)
+            setPadding(16, 6, 16, 6)
+            setOnClickListener {
+                controllerView.hapticHelper.heavyClick()
+            }
+        }
+        layout.addView(testHapticBtn, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+            topMargin = 6
+            bottomMargin = 16
+        })
 
         val dialog = AlertDialog.Builder(this)
             .setTitle("⚙ VirtualPad Settings")
@@ -555,6 +940,37 @@ class MainActivity : Activity(), SensorEventListener {
         }
         buttonControlsRow.addView(shapeButton, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { rightMargin = 14 })
 
+        modeButton = Button(this).apply {
+            text = "Mode: Hold ⏱️"
+            textSize = 12f
+            setTextColor(Color.WHITE)
+            background = createCardDrawable(Color.parseColor("#374151"), 12f)
+            setPadding(18, 6, 18, 6)
+            setOnClickListener { cycleSelectedButtonMode() }
+        }
+        buttonControlsRow.addView(modeButton, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { rightMargin = 14 })
+
+        turboCpsButton = Button(this).apply {
+            text = "⚡ 12 CPS"
+            textSize = 12f
+            setTextColor(Color.parseColor("#FFD600"))
+            background = createCardDrawable(Color.parseColor("#3D3200"), 12f, Color.parseColor("#FFD600"), 1)
+            setPadding(16, 6, 16, 6)
+            visibility = View.GONE
+            setOnClickListener { cycleSelectedTurboCps() }
+        }
+        buttonControlsRow.addView(turboCpsButton, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { rightMargin = 14 })
+
+        macroButton = Button(this).apply {
+            text = "Macro: OFF"
+            textSize = 12f
+            setTextColor(Color.parseColor("#E040FB"))
+            background = createCardDrawable(Color.parseColor("#34143D"), 12f, Color.parseColor("#E040FB"), 1)
+            setPadding(16, 6, 16, 6)
+            setOnClickListener { showMacroStudioDialog() }
+        }
+        buttonControlsRow.addView(macroButton, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { rightMargin = 14 })
+
         deleteButton = Button(this).apply {
             text = "Delete"
             textSize = 12f
@@ -645,6 +1061,13 @@ class MainActivity : Activity(), SensorEventListener {
             dpadControlsRow.visibility = View.GONE
             bindKeyButton.isEnabled = false
             shapeButton.isEnabled = false
+            modeButton.isEnabled = false
+            modeButton.alpha = 0.4f
+            modeButton.text = "Mode: Hold ⏱️"
+            turboCpsButton.visibility = View.GONE
+            macroButton.isEnabled = false
+            macroButton.alpha = 0.4f
+            macroButton.text = "Macro: OFF"
             deleteButton.isEnabled = false
             deleteButton.alpha = 0.4f
         } else {
@@ -662,6 +1085,11 @@ class MainActivity : Activity(), SensorEventListener {
                     dpadDownBtn.text = "↓ [${formatKeyDisplay(el.dpadDownKey)}]"
                     dpadLeftBtn.text = "← [${formatKeyDisplay(el.dpadLeftKey)}]"
                     dpadRightBtn.text = "→ [${formatKeyDisplay(el.dpadRightKey)}]"
+                }
+                ElementType.SCROLL_WHEEL -> {
+                    inspectorTitle.text = "Selected: Mouse Scroll Wheel (Swipe Up/Down to switch weapons; Tap to Ping/MMB)"
+                    buttonControlsRow.visibility = View.GONE
+                    dpadControlsRow.visibility = View.GONE
                 }
                 ElementType.BUTTON -> {
                     val typeStr = if (el.isCustom) "Custom Button ${el.customSlot + 1}" else "Button ${el.id.uppercase()}"
@@ -683,11 +1111,30 @@ class MainActivity : Activity(), SensorEventListener {
                         ButtonShape.ROUNDED_RECT -> "Pill"
                     }
 
+                    modeButton.isEnabled = true
+                    modeButton.alpha = 1.0f
+                    modeButton.text = when {
+                        el.isTurbo -> "Mode: Turbo ⚡"
+                        el.isToggle -> "Mode: Toggle 🔒"
+                        else -> "Mode: Hold ⏱️"
+                    }
+
+                    if (el.isTurbo) {
+                        turboCpsButton.visibility = View.VISIBLE
+                        turboCpsButton.text = "⚡ ${el.turboCps} CPS"
+                    } else {
+                        turboCpsButton.visibility = View.GONE
+                    }
+
+                    macroButton.isEnabled = true
+                    macroButton.alpha = 1.0f
+                    macroButton.text = if (el.macroType.isEmpty() && el.customMacro.isEmpty()) "Macro: OFF" else "Macro: ⚡"
+
                     deleteButton.isEnabled = el.isCustom
                     deleteButton.alpha = if (el.isCustom) 1.0f else 0.4f
                 }
                 ElementType.STICK -> {
-                    inspectorTitle.text = "Selected: Left Movement Joystick"
+                    inspectorTitle.text = "Selected: Movement Stick (Push > 80% to Sprint, drag to 🏃 to Lock Auto-Run)"
                     buttonControlsRow.visibility = View.VISIBLE
                     dpadControlsRow.visibility = View.GONE
                     bindKeyButton.isEnabled = false
@@ -695,6 +1142,12 @@ class MainActivity : Activity(), SensorEventListener {
                     bindKeyButton.text = "WASD (Move)"
                     shapeButton.isEnabled = false
                     shapeButton.alpha = 0.4f
+                    modeButton.isEnabled = false
+                    modeButton.alpha = 0.4f
+                    turboCpsButton.visibility = View.GONE
+                    macroButton.isEnabled = false
+                    macroButton.alpha = 0.4f
+                    macroButton.text = "Macro: OFF"
                     deleteButton.isEnabled = false
                     deleteButton.alpha = 0.4f
                 }
@@ -713,6 +1166,847 @@ class MainActivity : Activity(), SensorEventListener {
         }
         controllerView.updateSelectedShape(nextShape)
         updateInspector(selected)
+    }
+
+    private fun cycleSelectedButtonMode() {
+        val selected = controllerView.selectedElement ?: return
+        if (selected.type != ElementType.BUTTON) return
+
+        when {
+            !selected.isToggle && !selected.isTurbo -> {
+                // Hold -> Toggle
+                controllerView.updateSelectedButtonMode(isToggle = true, isTurbo = false)
+                Toast.makeText(this, "Toggle Mode 🔒: Tap to lock ON, tap again to release", Toast.LENGTH_SHORT).show()
+            }
+            selected.isToggle -> {
+                // Toggle -> Turbo
+                controllerView.updateSelectedButtonMode(isToggle = false, isTurbo = true)
+                Toast.makeText(this, "Turbo Mode ⚡: Hold for rapid-fire auto-click (${selected.turboCps} CPS)", Toast.LENGTH_SHORT).show()
+            }
+            else -> {
+                // Turbo -> Hold
+                controllerView.updateSelectedButtonMode(isToggle = false, isTurbo = false)
+                Toast.makeText(this, "Hold Mode ⏱️: Standard press & hold", Toast.LENGTH_SHORT).show()
+            }
+        }
+        updateInspector(selected)
+    }
+
+    private fun cycleSelectedTurboCps() {
+        val selected = controllerView.selectedElement ?: return
+        if (selected.type != ElementType.BUTTON || !selected.isTurbo) return
+
+        val speeds = listOf(8, 12, 16, 20, 25)
+        val currentIndex = speeds.indexOf(selected.turboCps)
+        val nextCps = if (currentIndex != -1 && currentIndex < speeds.size - 1) {
+            speeds[currentIndex + 1]
+        } else {
+            speeds[0]
+        }
+        controllerView.updateSelectedButtonMode(isToggle = false, isTurbo = true, turboCps = nextCps)
+        updateInspector(selected)
+        Toast.makeText(this, "Turbo Speed: $nextCps Clicks Per Second", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun buildRecordingBanner(root: FrameLayout) {
+        recordingBanner = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(28, 14, 28, 14)
+            background = createCardDrawable(Color.parseColor("#F0111827"), 28f, Color.parseColor("#E040FB"), 2)
+            visibility = View.GONE
+            elevation = 50f
+
+            val recTitle = TextView(this@MainActivity).apply {
+                text = "🔴 RECORDING: Tap buttons on HUD... "
+                textSize = 13f
+                setTextColor(Color.WHITE)
+                setTypeface(null, android.graphics.Typeface.BOLD)
+            }
+            recTitleText = recTitle
+            addView(recTitle)
+
+            val cancelRecBtn = Button(this@MainActivity).apply {
+                text = "✕ CANCEL"
+                textSize = 12f
+                setTextColor(Color.parseColor("#8B949E"))
+                background = createCardDrawable(Color.parseColor("#21262D"), 14f)
+                setPadding(18, 6, 18, 6)
+                setOnClickListener {
+                    cancelLiveRecording()
+                }
+            }
+            addView(cancelRecBtn, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { leftMargin = 16 })
+
+            val stopRecBtn = Button(this@MainActivity).apply {
+                text = "⏹️ DONE"
+                textSize = 12f
+                setTextColor(Color.WHITE)
+                setTypeface(null, android.graphics.Typeface.BOLD)
+                background = createCardDrawable(Color.parseColor("#E040FB"), 14f)
+                setPadding(22, 6, 22, 6)
+                setOnClickListener {
+                    stopLiveRecordingAndOpenStudio()
+                }
+            }
+            addView(stopRecBtn, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { leftMargin = 10 })
+        }
+        val recParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT).apply {
+            gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+            topMargin = 20
+        }
+        root.addView(recordingBanner, recParams)
+    }
+
+    private fun cancelLiveRecording() {
+        controllerView.isRecordingMacro = false
+        controllerView.isEditMode = true
+        recordingBanner.visibility = View.GONE
+        editOverlay.visibility = View.VISIBLE
+        gearButton.visibility = View.VISIBLE
+        val targetEl = liveRecordingTarget ?: controllerView.selectedElement
+        if (targetEl != null) {
+            controllerView.selectElement(targetEl)
+            showMacroStudioDialog(targetEl)
+        }
+    }
+
+    private fun startLiveRecording(targetEl: HudElement) {
+        liveRecordingTarget = targetEl
+        recordedEvents.clear()
+        controllerView.isRecordingMacro = true
+        controllerView.isEditMode = false // Exit edit touch handling so HUD buttons receive touch!
+        editOverlay.visibility = View.GONE
+        gearButton.visibility = View.GONE
+        recTitleText?.text = "🔴 RECORDING: Tap buttons on HUD with real rhythm..."
+        recordingBanner.visibility = View.VISIBLE
+        recordingBanner.bringToFront()
+        controllerView.hapticHelper.heavyClick()
+        Toast.makeText(this, "🔴 Recording started! Tap HUD buttons with your natural rhythm", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun stopLiveRecordingAndOpenStudio() {
+        controllerView.isRecordingMacro = false
+        controllerView.isEditMode = true // Re-enable layout edit mode
+        recordingBanner.visibility = View.GONE
+        editOverlay.visibility = View.VISIBLE
+        gearButton.visibility = View.VISIBLE
+        controllerView.hapticHelper.click()
+
+        val targetEl = liveRecordingTarget ?: controllerView.selectedElement
+        val steps = convertRecordedEventsToSteps(recordedEvents)
+        if (steps.isEmpty()) {
+            Toast.makeText(this, "No buttons pressed during recording", Toast.LENGTH_SHORT).show()
+        } else {
+            Toast.makeText(this, "Captured ${steps.size} macro steps!", Toast.LENGTH_SHORT).show()
+        }
+        if (targetEl != null) {
+            controllerView.selectElement(targetEl)
+            showMacroStudioDialog(targetEl, initialSteps = steps)
+        }
+    }
+
+    private fun convertRecordedEventsToSteps(events: List<RecordedInputEvent>): MutableList<MacroStep> {
+        val steps = mutableListOf<MacroStep>()
+        if (events.isEmpty()) return steps
+
+        // 1. Identify for each DOWN event its corresponding UP event and duration
+        val activeDowns = HashMap<String, RecordedInputEvent>()
+        val downDurations = HashMap<RecordedInputEvent, Long>()
+        val isCleanTap = HashSet<RecordedInputEvent>()
+
+        for (i in events.indices) {
+            val evt = events[i]
+            if (evt.isDown) {
+                activeDowns[evt.key] = evt
+            } else {
+                val downEvt = activeDowns.remove(evt.key)
+                if (downEvt != null) {
+                    val duration = (evt.timestampMs - downEvt.timestampMs).coerceIn(20L, 5000L)
+                    downDurations[downEvt] = duration
+                    val downIndex = events.indexOf(downEvt)
+                    var hasIntervening = false
+                    for (j in (downIndex + 1) until i) {
+                        if (events[j].key != evt.key) {
+                            hasIntervening = true
+                            break
+                        }
+                    }
+                    if (!hasIntervening) {
+                        isCleanTap.add(downEvt)
+                    }
+                }
+            }
+        }
+
+        var lastEventTime = events.first().timestampMs
+        val currentlyHeld = HashSet<String>()
+
+        for (i in events.indices) {
+            val evt = events[i]
+            val waitDelay = evt.timestampMs - lastEventTime
+
+            if (evt.isDown) {
+                if (isCleanTap.contains(evt)) {
+                    if (waitDelay >= 20L) {
+                        steps.add(MacroStep(MacroActionType.WAIT, "", waitDelay.coerceIn(20L, 5000L)))
+                    }
+                    val duration = downDurations[evt] ?: 50L
+                    steps.add(MacroStep(MacroActionType.TAP, evt.key, duration))
+                    lastEventTime = evt.timestampMs + duration
+                } else {
+                    if (waitDelay >= 20L) {
+                        steps.add(MacroStep(MacroActionType.WAIT, "", waitDelay.coerceIn(20L, 5000L)))
+                    }
+                    steps.add(MacroStep(MacroActionType.HOLD, evt.key, 0))
+                    currentlyHeld.add(evt.key)
+                    lastEventTime = evt.timestampMs
+                }
+            } else {
+                val matchingDown = events.subList(0, i).lastOrNull { it.isDown && it.key == evt.key }
+                if (matchingDown != null && isCleanTap.contains(matchingDown)) {
+                    continue
+                }
+                if (currentlyHeld.contains(evt.key)) {
+                    if (waitDelay >= 20L) {
+                        steps.add(MacroStep(MacroActionType.WAIT, "", waitDelay.coerceIn(20L, 5000L)))
+                    }
+                    steps.add(MacroStep(MacroActionType.RELEASE, evt.key, 0))
+                    currentlyHeld.remove(evt.key)
+                    lastEventTime = evt.timestampMs
+                }
+            }
+        }
+
+        for (k in currentlyHeld) {
+            steps.add(MacroStep(MacroActionType.RELEASE, k, 0))
+        }
+
+        while (steps.isNotEmpty() && steps.last().action == MacroActionType.WAIT) {
+            steps.removeAt(steps.size - 1)
+        }
+        return steps
+    }
+
+    private fun showKeyPickerForMacro(title: String, onChosen: (String) -> Unit) {
+        val names = VALID_KEY_LIST.map { "${it.displayName} [${it.code}]" }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle(title)
+            .setItems(names) { _, which ->
+                onChosen(VALID_KEY_LIST[which].code)
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun showDelayInputDialog(currentMs: Long, onChosen: (Long) -> Unit) {
+        val options = listOf("20ms" to 20L, "30ms" to 30L, "50ms" to 50L, "80ms" to 80L, "100ms" to 100L, "150ms" to 150L, "250ms" to 250L, "500ms" to 500L, "Custom..." to -1L)
+        val names = options.map { it.first }.toTypedArray()
+
+        AlertDialog.Builder(this)
+            .setTitle("Select Wait Delay (Milliseconds)")
+            .setItems(names) { _, which ->
+                val chosen = options[which]
+                if (chosen.second > 0) {
+                    onChosen(chosen.second)
+                } else {
+                    val input = EditText(this).apply {
+                        setText(currentMs.toString())
+                        inputType = android.text.InputType.TYPE_CLASS_NUMBER
+                        setPadding(32, 16, 32, 16)
+                    }
+                    AlertDialog.Builder(this)
+                        .setTitle("Enter Custom Delay (ms)")
+                        .setView(input)
+                        .setPositiveButton("OK") { _, _ ->
+                            val ms = input.text.toString().toLongOrNull()?.coerceIn(5L, 10000L) ?: 50L
+                            onChosen(ms)
+                        }
+                        .setNegativeButton("Cancel", null)
+                        .show()
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun showEditStepDialog(step: MacroStep, onUpdated: () -> Unit) {
+        when (step.action) {
+            MacroActionType.TAP -> {
+                val opts = arrayOf("Change Key [Current: ${step.key}]", "Change Tap Duration [Current: ${step.durationMs}ms]")
+                AlertDialog.Builder(this)
+                    .setTitle("Edit Tap Step")
+                    .setItems(opts) { _, which ->
+                        if (which == 0) {
+                            showKeyPickerForMacro("Change Key") { newKey ->
+                                step.key = newKey
+                                onUpdated()
+                            }
+                        } else {
+                            showDelayInputDialog(step.durationMs) { newMs ->
+                                step.durationMs = newMs
+                                onUpdated()
+                            }
+                        }
+                    }
+                    .setNegativeButton("Cancel", null)
+                    .show()
+            }
+            MacroActionType.WAIT -> {
+                showDelayInputDialog(step.durationMs) { newMs ->
+                    step.durationMs = newMs
+                    onUpdated()
+                }
+            }
+            MacroActionType.HOLD, MacroActionType.RELEASE -> {
+                showKeyPickerForMacro("Change Key") { newKey ->
+                    step.key = newKey
+                    onUpdated()
+                }
+            }
+        }
+    }
+
+    private fun showMacroStudioDialog(targetElement: HudElement? = null, initialSteps: List<MacroStep>? = null) {
+        val selected = targetElement ?: controllerView.selectedElement ?: return
+        if (selected.type != ElementType.BUTTON) return
+
+        val currentSteps = mutableListOf<MacroStep>()
+        if (initialSteps != null) {
+            currentSteps.addAll(initialSteps)
+        } else if (selected.customMacro.isNotEmpty()) {
+            currentSteps.addAll(MacroStep.listFromJson(selected.customMacro))
+        } else if (selected.macroType.isNotEmpty()) {
+            when (selected.macroType) {
+                "slide_cancel" -> {
+                    currentSteps.add(MacroStep(MacroActionType.TAP, "c", 50))
+                    currentSteps.add(MacroStep(MacroActionType.WAIT, "", 20))
+                    currentSteps.add(MacroStep(MacroActionType.TAP, "c", 50))
+                    currentSteps.add(MacroStep(MacroActionType.WAIT, "", 20))
+                    currentSteps.add(MacroStep(MacroActionType.TAP, "space", 60))
+                }
+                "shoot_melee" -> {
+                    currentSteps.add(MacroStep(MacroActionType.TAP, "mouse_left", 40))
+                    currentSteps.add(MacroStep(MacroActionType.WAIT, "", 30))
+                    currentSteps.add(MacroStep(MacroActionType.TAP, "v", 60))
+                }
+                "super_jump" -> {
+                    currentSteps.add(MacroStep(MacroActionType.HOLD, "space", 0))
+                    currentSteps.add(MacroStep(MacroActionType.HOLD, "c", 0))
+                    currentSteps.add(MacroStep(MacroActionType.WAIT, "", 80))
+                    currentSteps.add(MacroStep(MacroActionType.RELEASE, "space", 0))
+                    currentSteps.add(MacroStep(MacroActionType.RELEASE, "c", 0))
+                }
+                "armor_plate" -> {
+                    currentSteps.add(MacroStep(MacroActionType.TAP, "4", 2500))
+                }
+                "quick_180" -> {
+                    currentSteps.add(MacroStep(MacroActionType.TAP, "right", 150))
+                }
+            }
+        }
+
+        val dialogView = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(28, 16, 28, 12)
+            setBackgroundColor(Color.parseColor("#161B22"))
+        }
+
+        // --- 1. Header Bar ---
+        val headerRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val titleText = TextView(this).apply {
+            text = "⚡ Macro Studio: ${selected.label.ifEmpty { selected.id.uppercase() }}"
+            textSize = 17f
+            setTextColor(Color.WHITE)
+            setTypeface(null, android.graphics.Typeface.BOLD)
+        }
+        headerRow.addView(titleText, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+
+        val closeBtn = Button(this).apply {
+            text = "✕"
+            textSize = 15f
+            setTextColor(Color.parseColor("#8B949E"))
+            background = null
+            setPadding(8, 0, 8, 0)
+        }
+        headerRow.addView(closeBtn, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+        dialogView.addView(headerRow)
+
+        // --- 2. Presets Quick Bar ---
+        val presetScroll = HorizontalScrollView(this).apply {
+            setPadding(0, 10, 0, 10)
+            isHorizontalScrollBarEnabled = false
+        }
+        val presetRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+        }
+
+        val presetLabel = TextView(this).apply {
+            text = "Presets: "
+            textSize = 11f
+            setTextColor(Color.parseColor("#8B949E"))
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        presetRow.addView(presetLabel)
+
+        fun createPresetBtn(name: String, block: () -> Unit) = Button(this).apply {
+            text = name
+            textSize = 10f
+            setTextColor(Color.parseColor("#58A6FF"))
+            background = createCardDrawable(Color.parseColor("#21262D"), 10f, Color.parseColor("#30363D"), 1)
+            setPadding(14, 4, 14, 4)
+            setOnClickListener { block() }
+        }
+
+        var updateStudioUiRef: (() -> Unit)? = null
+
+        presetRow.addView(createPresetBtn("Slide Cancel") {
+            currentSteps.clear()
+            currentSteps.add(MacroStep(MacroActionType.TAP, "c", 50))
+            currentSteps.add(MacroStep(MacroActionType.WAIT, "", 20))
+            currentSteps.add(MacroStep(MacroActionType.TAP, "c", 50))
+            currentSteps.add(MacroStep(MacroActionType.WAIT, "", 20))
+            currentSteps.add(MacroStep(MacroActionType.TAP, "space", 60))
+            updateStudioUiRef?.invoke()
+            Toast.makeText(this, "Loaded Slide Cancel preset", Toast.LENGTH_SHORT).show()
+        }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { rightMargin = 8 })
+
+        presetRow.addView(createPresetBtn("Shoot + Melee") {
+            currentSteps.clear()
+            currentSteps.add(MacroStep(MacroActionType.TAP, "mouse_left", 40))
+            currentSteps.add(MacroStep(MacroActionType.WAIT, "", 30))
+            currentSteps.add(MacroStep(MacroActionType.TAP, "v", 60))
+            updateStudioUiRef?.invoke()
+            Toast.makeText(this, "Loaded Shoot + Melee preset", Toast.LENGTH_SHORT).show()
+        }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { rightMargin = 8 })
+
+        presetRow.addView(createPresetBtn("Super Jump") {
+            currentSteps.clear()
+            currentSteps.add(MacroStep(MacroActionType.HOLD, "space", 0))
+            currentSteps.add(MacroStep(MacroActionType.HOLD, "c", 0))
+            currentSteps.add(MacroStep(MacroActionType.WAIT, "", 80))
+            currentSteps.add(MacroStep(MacroActionType.RELEASE, "space", 0))
+            currentSteps.add(MacroStep(MacroActionType.RELEASE, "c", 0))
+            updateStudioUiRef?.invoke()
+            Toast.makeText(this, "Loaded Super Jump preset", Toast.LENGTH_SHORT).show()
+        }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { rightMargin = 8 })
+
+        presetRow.addView(createPresetBtn("Armor Plate") {
+            currentSteps.clear()
+            currentSteps.add(MacroStep(MacroActionType.TAP, "4", 2500))
+            updateStudioUiRef?.invoke()
+            Toast.makeText(this, "Loaded Armor Plate preset", Toast.LENGTH_SHORT).show()
+        }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { rightMargin = 8 })
+
+        presetRow.addView(createPresetBtn("Clear All") {
+            currentSteps.clear()
+            updateStudioUiRef?.invoke()
+        }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { rightMargin = 8 })
+
+        presetScroll.addView(presetRow)
+        dialogView.addView(presetScroll)
+
+        // --- 3. Mode Tab Selector ---
+        var currentTab = 0 // 0: Visual Builder, 1: Text Script
+        val tabRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, 8, 0, 12)
+        }
+
+        val tabVisualBtn = Button(this).apply {
+            text = "🧩 Visual Builder"
+            textSize = 12f
+            setPadding(20, 8, 20, 8)
+        }
+        val tabScriptBtn = Button(this).apply {
+            text = "📝 Script / Text"
+            textSize = 12f
+            setPadding(20, 8, 20, 8)
+        }
+        val recLiveBtn = Button(this).apply {
+            text = "🔴 Live Record"
+            textSize = 12f
+            setTextColor(Color.parseColor("#FF6B6B"))
+            background = createCardDrawable(Color.parseColor("#3D1414"), 12f, Color.parseColor("#FF6B6B"), 1)
+            setPadding(20, 8, 20, 8)
+        }
+
+        tabRow.addView(tabVisualBtn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = 8 })
+        tabRow.addView(tabScriptBtn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = 8 })
+        tabRow.addView(recLiveBtn, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+        dialogView.addView(tabRow)
+
+        // --- 4. Main Body: Visual View vs Script View ---
+        val contentContainer = FrameLayout(this)
+
+        // VISUAL CONTAINER
+        val visualContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        val stepsScrollView = ScrollView(this).apply {
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 210)
+        }
+        val stepsLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        stepsScrollView.addView(stepsLayout)
+        visualContainer.addView(stepsScrollView)
+
+        // Visual Add Action Bar
+        val addBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, 10, 0, 0)
+        }
+        fun createAddBtn(text: String, color: Int, block: () -> Unit) = Button(this).apply {
+            this.text = text
+            textSize = 11f
+            setTextColor(Color.WHITE)
+            background = createCardDrawable(color, 12f)
+            setPadding(12, 6, 12, 6)
+            setOnClickListener { block() }
+        }
+
+        addBar.addView(createAddBtn("+ Tap Key", Color.parseColor("#1F6FEB")) {
+            showKeyPickerForMacro("Tap Key") { chosenKey ->
+                currentSteps.add(MacroStep(MacroActionType.TAP, chosenKey, 50))
+                updateStudioUiRef?.invoke()
+            }
+        }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = 6 })
+
+        addBar.addView(createAddBtn("+ Wait Delay", Color.parseColor("#388E3C")) {
+            showDelayInputDialog(50) { ms ->
+                currentSteps.add(MacroStep(MacroActionType.WAIT, "", ms))
+                updateStudioUiRef?.invoke()
+            }
+        }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = 6 })
+
+        addBar.addView(createAddBtn("+ Hold", Color.parseColor("#E65100")) {
+            showKeyPickerForMacro("Hold Key Down") { chosenKey ->
+                currentSteps.add(MacroStep(MacroActionType.HOLD, chosenKey, 0))
+                updateStudioUiRef?.invoke()
+            }
+        }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = 6 })
+
+        addBar.addView(createAddBtn("+ Release", Color.parseColor("#6A1B9A")) {
+            showKeyPickerForMacro("Release Key Up") { chosenKey ->
+                currentSteps.add(MacroStep(MacroActionType.RELEASE, chosenKey, 0))
+                updateStudioUiRef?.invoke()
+            }
+        }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+
+        visualContainer.addView(addBar)
+        contentContainer.addView(visualContainer)
+
+        // SCRIPT CONTAINER
+        val scriptContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+        }
+        val scriptHint = TextView(this).apply {
+            text = "Syntax: TAP <key> <ms> | WAIT <ms> | HOLD <key> | RELEASE <key> (or shorthand: c:50, 30, space:60)"
+            textSize = 10f
+            setTextColor(Color.parseColor("#8B949E"))
+            setPadding(0, 0, 0, 6)
+        }
+        scriptContainer.addView(scriptHint)
+
+        val scriptEdit = EditText(this).apply {
+            textSize = 12f
+            setTextColor(Color.parseColor("#58A6FF"))
+            typeface = android.graphics.Typeface.MONOSPACE
+            background = createCardDrawable(Color.parseColor("#0D1117"), 12f, Color.parseColor("#30363D"), 1)
+            setPadding(16, 12, 16, 12)
+            gravity = Gravity.TOP or Gravity.START
+            minLines = 4
+            maxLines = 6
+        }
+        scriptContainer.addView(scriptEdit)
+
+        val scriptBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, 10, 0, 0)
+        }
+        val copyScriptBtn = Button(this).apply {
+            text = "📋 Copy Script"
+            textSize = 11f
+            setTextColor(Color.WHITE)
+            background = createCardDrawable(Color.parseColor("#21262D"), 12f, Color.parseColor("#58A6FF"), 1)
+            setPadding(14, 6, 14, 6)
+            setOnClickListener {
+                val clip = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                clip.setPrimaryClip(ClipData.newPlainText("VirtualPad Macro", scriptEdit.text.toString()))
+                Toast.makeText(this@MainActivity, "Macro script copied to clipboard!", Toast.LENGTH_SHORT).show()
+            }
+        }
+        val pasteScriptBtn = Button(this).apply {
+            text = "📥 Paste"
+            textSize = 11f
+            setTextColor(Color.WHITE)
+            background = createCardDrawable(Color.parseColor("#21262D"), 12f, Color.parseColor("#58A6FF"), 1)
+            setPadding(14, 6, 14, 6)
+            setOnClickListener {
+                val clip = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                val text = clip.primaryClip?.getItemAt(0)?.text?.toString() ?: ""
+                if (text.isNotEmpty()) {
+                    scriptEdit.setText(text)
+                    Toast.makeText(this@MainActivity, "Pasted script from clipboard", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+        val applyScriptBtn = Button(this).apply {
+            text = "✓ Apply to Steps"
+            textSize = 11f
+            setTextColor(Color.WHITE)
+            background = createCardDrawable(Color.parseColor("#1F6FEB"), 12f)
+            setPadding(16, 6, 16, 6)
+            setOnClickListener {
+                val parsed = MacroStep.parseScriptText(scriptEdit.text.toString())
+                currentSteps.clear()
+                currentSteps.addAll(parsed)
+                currentTab = 0
+                updateStudioUiRef?.invoke()
+                Toast.makeText(this@MainActivity, "Parsed ${parsed.size} macro steps!", Toast.LENGTH_SHORT).show()
+            }
+        }
+        scriptBar.addView(copyScriptBtn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = 8 })
+        scriptBar.addView(pasteScriptBtn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = 8 })
+        scriptBar.addView(applyScriptBtn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.2f))
+        scriptContainer.addView(scriptBar)
+
+        contentContainer.addView(scriptContainer)
+        dialogView.addView(contentContainer)
+
+        // --- 5. Footer Action Bar ---
+        val footerRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, 16, 0, 0)
+        }
+
+        val testBtn = Button(this).apply {
+            text = "▶️ Test Macro"
+            textSize = 12f
+            setTextColor(Color.parseColor("#00E676"))
+            background = createCardDrawable(Color.parseColor("#143D24"), 12f, Color.parseColor("#00E676"), 1)
+            setPadding(16, 8, 16, 8)
+        }
+
+        val cancelBtn = Button(this).apply {
+            text = "Cancel"
+            textSize = 12f
+            setTextColor(Color.parseColor("#8B949E"))
+            background = createCardDrawable(Color.parseColor("#21262D"), 12f)
+            setPadding(16, 8, 16, 8)
+        }
+
+        val saveBtn = Button(this).apply {
+            text = "💾 Save & Apply"
+            textSize = 12f
+            setTextColor(Color.WHITE)
+            setTypeface(null, android.graphics.Typeface.BOLD)
+            background = createCardDrawable(Color.parseColor("#E040FB"), 12f)
+            setPadding(20, 8, 20, 8)
+        }
+
+        footerRow.addView(testBtn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.2f).apply { rightMargin = 8 })
+        footerRow.addView(cancelBtn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 0.8f).apply { rightMargin = 8 })
+        footerRow.addView(saveBtn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.4f))
+        dialogView.addView(footerRow)
+
+        fun updateUi() {
+            if (currentTab == 0) {
+                tabVisualBtn.setTextColor(Color.WHITE)
+                tabVisualBtn.background = createCardDrawable(Color.parseColor("#1F6FEB"), 12f)
+                tabScriptBtn.setTextColor(Color.parseColor("#8B949E"))
+                tabScriptBtn.background = createCardDrawable(Color.parseColor("#21262D"), 12f)
+                visualContainer.visibility = View.VISIBLE
+                scriptContainer.visibility = View.GONE
+
+                stepsLayout.removeAllViews()
+                if (currentSteps.isEmpty()) {
+                    val emptyTv = TextView(this).apply {
+                        text = "No macro steps yet.\nUse [+ Tap Key], [+ Wait Delay], or [🔴 Live Record] to build your combo."
+                        textSize = 12f
+                        setTextColor(Color.parseColor("#8B949E"))
+                        gravity = Gravity.CENTER
+                        setPadding(16, 40, 16, 40)
+                    }
+                    stepsLayout.addView(emptyTv)
+                } else {
+                    for (i in currentSteps.indices) {
+                        val step = currentSteps[i]
+                        val card = LinearLayout(this).apply {
+                            orientation = LinearLayout.HORIZONTAL
+                            gravity = Gravity.CENTER_VERTICAL
+                            setPadding(16, 10, 12, 10)
+                            background = createCardDrawable(Color.parseColor("#21262D"), 10f, Color.parseColor("#30363D"), 1)
+                        }
+
+                        val stepNum = TextView(this).apply {
+                            text = "${i + 1}."
+                            textSize = 12f
+                            setTextColor(Color.parseColor("#58A6FF"))
+                            setTypeface(null, android.graphics.Typeface.BOLD)
+                            setPadding(0, 0, 10, 0)
+                        }
+                        card.addView(stepNum)
+
+                        val stepDesc = TextView(this).apply {
+                            text = when (step.action) {
+                                MacroActionType.TAP -> "⬇️ Tap '${step.key.uppercase()}' (${step.durationMs}ms)"
+                                MacroActionType.HOLD -> "⬇️ Hold '${step.key.uppercase()}'"
+                                MacroActionType.RELEASE -> "⬆️ Release '${step.key.uppercase()}'"
+                                MacroActionType.WAIT -> "⏱️ Wait ${step.durationMs}ms"
+                            }
+                            textSize = 12f
+                            setTextColor(Color.WHITE)
+                        }
+                        card.addView(stepDesc, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+
+                        val editBtn = Button(this).apply {
+                            text = "✏️"
+                            textSize = 11f
+                            setTextColor(Color.WHITE)
+                            background = createCardDrawable(Color.parseColor("#30363D"), 8f)
+                            setPadding(12, 4, 12, 4)
+                            setOnClickListener {
+                                showEditStepDialog(step) { updateUi() }
+                            }
+                        }
+                        card.addView(editBtn, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { rightMargin = 6 })
+
+                        if (i > 0) {
+                            val upBtn = Button(this).apply {
+                                text = "▲"
+                                textSize = 11f
+                                setTextColor(Color.WHITE)
+                                background = createCardDrawable(Color.parseColor("#30363D"), 8f)
+                                setPadding(10, 4, 10, 4)
+                                setOnClickListener {
+                                    val temp = currentSteps[i - 1]
+                                    currentSteps[i - 1] = currentSteps[i]
+                                    currentSteps[i] = temp
+                                    updateUi()
+                                }
+                            }
+                            card.addView(upBtn, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { rightMargin = 6 })
+                        }
+
+                        if (i < currentSteps.size - 1) {
+                            val downBtn = Button(this).apply {
+                                text = "▼"
+                                textSize = 11f
+                                setTextColor(Color.WHITE)
+                                background = createCardDrawable(Color.parseColor("#30363D"), 8f)
+                                setPadding(10, 4, 10, 4)
+                                setOnClickListener {
+                                    val temp = currentSteps[i + 1]
+                                    currentSteps[i + 1] = currentSteps[i]
+                                    currentSteps[i] = temp
+                                    updateUi()
+                                }
+                            }
+                            card.addView(downBtn, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { rightMargin = 6 })
+                        }
+
+                        val delBtn = Button(this).apply {
+                            text = "🗑️"
+                            textSize = 11f
+                            setTextColor(Color.parseColor("#FF6B6B"))
+                            background = createCardDrawable(Color.parseColor("#3D1414"), 8f)
+                            setPadding(10, 4, 10, 4)
+                            setOnClickListener {
+                                currentSteps.removeAt(i)
+                                updateUi()
+                            }
+                        }
+                        card.addView(delBtn, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+
+                        stepsLayout.addView(card, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { bottomMargin = 8 })
+                    }
+                }
+            } else {
+                tabVisualBtn.setTextColor(Color.parseColor("#8B949E"))
+                tabVisualBtn.background = createCardDrawable(Color.parseColor("#21262D"), 12f)
+                tabScriptBtn.setTextColor(Color.WHITE)
+                tabScriptBtn.background = createCardDrawable(Color.parseColor("#1F6FEB"), 12f)
+                visualContainer.visibility = View.GONE
+                scriptContainer.visibility = View.VISIBLE
+                scriptEdit.setText(MacroStep.toScriptText(currentSteps))
+            }
+        }
+        updateStudioUiRef = ::updateUi
+
+        tabVisualBtn.setOnClickListener {
+            if (currentTab == 1) {
+                val parsed = MacroStep.parseScriptText(scriptEdit.text.toString())
+                currentSteps.clear()
+                currentSteps.addAll(parsed)
+            }
+            currentTab = 0
+            updateUi()
+        }
+
+        tabScriptBtn.setOnClickListener {
+            currentTab = 1
+            updateUi()
+        }
+
+        val dialog = AlertDialog.Builder(this)
+            .setView(dialogView)
+            .create()
+
+        closeBtn.setOnClickListener { dialog.dismiss() }
+        cancelBtn.setOnClickListener { dialog.dismiss() }
+
+        recLiveBtn.setOnClickListener {
+            dialog.dismiss()
+            startLiveRecording(selected)
+        }
+
+        testBtn.setOnClickListener {
+            if (currentTab == 1) {
+                val parsed = MacroStep.parseScriptText(scriptEdit.text.toString())
+                currentSteps.clear()
+                currentSteps.addAll(parsed)
+            }
+            if (currentSteps.isEmpty()) {
+                Toast.makeText(this@MainActivity, "No steps to test. Add steps or use Live Record!", Toast.LENGTH_SHORT).show()
+            } else {
+                controllerView.testMacro(currentSteps)
+                Toast.makeText(this@MainActivity, "▶️ Testing ${currentSteps.size} macro steps...", Toast.LENGTH_SHORT).show()
+            }
+        }
+
+        saveBtn.setOnClickListener {
+            if (currentTab == 1) {
+                val parsed = MacroStep.parseScriptText(scriptEdit.text.toString())
+                currentSteps.clear()
+                currentSteps.addAll(parsed)
+            }
+            if (currentSteps.isEmpty()) {
+                controllerView.updateSelectedMacro("", "")
+                updateInspector(selected)
+                Toast.makeText(this@MainActivity, "Macro cleared for this button", Toast.LENGTH_SHORT).show()
+            } else {
+                val json = MacroStep.listToJson(currentSteps)
+                controllerView.updateSelectedMacro("custom", json)
+                updateInspector(selected)
+                Toast.makeText(this@MainActivity, "Saved macro combo (${currentSteps.size} steps)!", Toast.LENGTH_SHORT).show()
+            }
+            dialog.dismiss()
+        }
+
+        dialog.show()
+        dialog.window?.let { w ->
+            val dm = resources.displayMetrics
+            val targetWidth = (dm.widthPixels * 0.88f).toInt()
+            val targetHeight = (dm.heightPixels * 0.90f).toInt()
+            w.setLayout(targetWidth, targetHeight)
+        }
+        updateUi()
     }
 
     private fun showKeyPickerDialog() {

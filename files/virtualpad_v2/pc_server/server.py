@@ -112,6 +112,8 @@ PACKET_FORMAT = "<BIbbhh"
 PACKET_SIZE = struct.calcsize(PACKET_FORMAT)  # 11 bytes
 PACKET_MAGIC = 0xAA
 PACKET_MAGIC_CONFIG = 0xAC
+PACKET_MAGIC_WHEEL = 0xAD
+PACKET_MAGIC_MACRO_KEY = 0xAE
 
 # ---------------------------------------------------------------------------
 # Interception init & mouse device discovery
@@ -309,6 +311,7 @@ def apply_packet(buttons: int, stick_x: float, stick_y: float, mouse_dx: int, mo
             request_key("s", "stick", stick_y > STICK_DEADZONE)
             request_key("a", "stick", stick_x < -STICK_DEADZONE)
             request_key("d", "stick", stick_x > STICK_DEADZONE)
+            request_key("shift", "stick_sprint", stick_y < -0.82)
             _last_stick_x = stick_x
             _last_stick_y = stick_y
 
@@ -327,6 +330,29 @@ def handle_raw_packet(data: bytes):
     apply_packet(buttons, stick_x, stick_y, dx, dy)
 
 
+def handle_wheel_packet(data: bytes):
+    if len(data) < 3:
+        return
+    wheel_delta = struct.unpack("<h", data[1:3])[0]
+    if wheel_delta != 0:
+        try:
+            ctypes.windll.user32.mouse_event(0x0800, 0, 0, int(wheel_delta), 0)
+        except Exception:
+            pass
+
+
+def handle_macro_key_packet(data: bytes):
+    if len(data) < 3:
+        return
+    pressed = bool(data[1])
+    try:
+        key = data[2:].decode("utf-8").strip().lower()
+        if key:
+            request_key(key, "macro", pressed)
+    except Exception:
+        pass
+
+
 def dispatch_packet(data: bytes):
     if not data:
         return
@@ -335,6 +361,10 @@ def dispatch_packet(data: bytes):
         handle_raw_packet(data)
     elif magic == PACKET_MAGIC_CONFIG:
         handle_config_packet(data)
+    elif magic == PACKET_MAGIC_WHEEL:
+        handle_wheel_packet(data)
+    elif magic == PACKET_MAGIC_MACRO_KEY:
+        handle_macro_key_packet(data)
 
 
 # ---------------------------------------------------------------------------

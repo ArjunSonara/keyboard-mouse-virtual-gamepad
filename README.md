@@ -9,6 +9,11 @@ Unlike conventional virtual controllers that emulate an Xbox/ViGEmBus controller
 ## ⚡ Features
 
 - **True Keyboard & Mouse Input**: Every button translates into real low-level keyboard key holds via the **Interception driver**. The swipe zone translates directly into fluid relative mouse movement.
+- **🏃 Joystick Sprint Lock & Dynamic Auto-Shift**: Drag stick forward past 80% to engage sprint (`Left Shift`) automatically, or slide up into the `🏃` notch for hands-free auto-run lock.
+- **📜 Mouse Scroll Wheel Strip**: Fast weapon switching and sniper zoom with dedicated vertical touch strip and ratchet haptics.
+- **⚡ 3-in-1 Macro Studio**: Complete custom combo creation via **🔴 Live HUD Recorder** (real finger rhythms & delays), **🧩 Visual Card Builder**, or **📝 Human-Readable Scripting** (`TAP c 50ms, WAIT 30ms, TAP space 60ms`) with 1-click clipboard sharing.
+- **📳 Rich Haptic Tactile Feedback**: Crisp micro-ticks, clicks, edge bumps, and heavy clicks across all buttons, stick boundaries, and gestures.
+- **🔒 Toggle Mode & ⚡ Turbo Rapid Fire**: Configure any button as toggle latching or hold-to-auto-click (5 to 30 CPS rapid fire).
 - **1-Click Windows Executable (`VirtualPad.exe`)**: No command prompt required! Double-click `VirtualPad.exe` to automatically handle ADB reverse USB routing, display Wi-Fi pairing QR code, and manage connections with zero console flickering.
 - **Customizable D-Pad (4-Way Directional Rebinding)**: Rebind each D-Pad direction (`Up`, `Down`, `Left`, `Right`) individually to any keyboard key or mouse click. Directional labels update dynamically on-screen.
 - **Key Shape Customization**: Toggle any button's shape between **Circle**, **Square**, and **Pill / Rounded Rect**.

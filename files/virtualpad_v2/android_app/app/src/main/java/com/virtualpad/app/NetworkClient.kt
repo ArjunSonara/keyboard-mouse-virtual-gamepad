@@ -13,6 +13,8 @@ import org.json.JSONObject
 
 const val PACKET_MAGIC: Byte = 0xAA.toByte()
 const val PACKET_MAGIC_CONFIG: Byte = 0xAC.toByte()
+const val PACKET_MAGIC_WHEEL: Byte = 0xAD.toByte()
+const val PACKET_MAGIC_MACRO_KEY: Byte = 0xAE.toByte()
 const val PACKET_SIZE = 11 // 1 (magic) + 4 (32-bit buttons) + 1 + 1 (stick) + 2 + 2 (mouse)
 const val DEFAULT_PORT = 6001
 
@@ -196,6 +198,30 @@ class NetworkClient {
                         Thread.sleep(40)
                     }
                 }
+            } catch (_: Exception) {}
+        }
+    }
+
+    fun sendScrollWheel(delta: Int) {
+        val buf = ByteBuffer.allocate(3).order(ByteOrder.LITTLE_ENDIAN)
+        buf.put(PACKET_MAGIC_WHEEL)
+        buf.putShort(delta.toShort())
+        sendExecutor.execute {
+            try {
+                sendRaw(buf.array())
+            } catch (_: Exception) {}
+        }
+    }
+
+    fun sendMacroKey(key: String, pressed: Boolean) {
+        val keyBytes = key.lowercase().toByteArray(Charsets.UTF_8)
+        val packet = ByteArray(2 + keyBytes.size)
+        packet[0] = PACKET_MAGIC_MACRO_KEY
+        packet[1] = if (pressed) 1.toByte() else 0.toByte()
+        System.arraycopy(keyBytes, 0, packet, 2, keyBytes.size)
+        sendExecutor.execute {
+            try {
+                sendRaw(packet)
             } catch (_: Exception) {}
         }
     }
