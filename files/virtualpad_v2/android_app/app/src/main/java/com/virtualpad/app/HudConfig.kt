@@ -252,7 +252,13 @@ data class HudElement(
     var turboCps: Int = 12,
     var macroType: String = "",
     var customMacro: String = "",
-    var rotation: Float = 0f
+    var rotation: Float = 0f,
+    var swipeToAim: Boolean = false,
+    var touchPadding: Float = 1.0f,
+    var showGhostShadow: Boolean = false,
+    var userExplicitGhostShadow: Boolean = false,
+    var maxDragDistance: Float = 0.8f,
+    var userExplicitDragDist: Boolean = false
 ) {
     fun toJson(): JSONObject {
         val obj = JSONObject()
@@ -280,6 +286,12 @@ data class HudElement(
             obj.put("turboCps", turboCps)
             obj.put("macroType", macroType)
             obj.put("customMacro", customMacro)
+            obj.put("swipeToAim", swipeToAim)
+            obj.put("touchPadding", touchPadding.toDouble())
+            obj.put("showGhostShadow", showGhostShadow)
+            obj.put("userExplicitGhostShadow", userExplicitGhostShadow)
+            obj.put("maxDragDistance", maxDragDistance.toDouble())
+            obj.put("userExplicitDragDist", userExplicitDragDist)
         }
         return obj
     }
@@ -290,10 +302,31 @@ data class HudElement(
             val type = try { ElementType.valueOf(typeStr) } catch (_: Exception) { ElementType.BUTTON }
             val shapeStr = obj.optString("shape", ButtonShape.CIRCLE.name)
             val shape = try { ButtonShape.valueOf(shapeStr) } catch (_: Exception) { ButtonShape.CIRCLE }
+            val keyStr = obj.optString("key", "")
+            val idStr = obj.getString("id")
+            val isMouseKey = keyStr.lowercase() in listOf("mouse_left", "mouse_right", "mouse_middle") || idStr.lowercase() in listOf("rt", "lt")
+            val defaultSwipeAim = isMouseKey
+            val swipeToAim = obj.optBoolean("swipeToAim", defaultSwipeAim)
+            val defaultPadding = if (isMouseKey) 1.4f else 1.0f
+            val touchPadding = obj.optDouble("touchPadding", defaultPadding.toDouble()).toFloat()
+            val defaultGhostShadow = isMouseKey
+            val showGhostShadow = if (obj.has("userExplicitGhostShadow")) {
+                obj.optBoolean("showGhostShadow", defaultGhostShadow)
+            } else {
+                defaultGhostShadow
+            }
+            val userExplicitGhostShadow = obj.optBoolean("userExplicitGhostShadow", false)
+            val hasExplicitDrag = obj.optBoolean("userExplicitDragDist", false)
+            val maxDragDistance = if (hasExplicitDrag) {
+                obj.optDouble("maxDragDistance", 0.8).toFloat()
+            } else {
+                0.8f
+            }
+            val userExplicitDragDist = hasExplicitDrag
             return HudElement(
-                id = obj.getString("id"),
+                id = idStr,
                 label = obj.optString("label", ""),
-                key = obj.optString("key", ""),
+                key = keyStr,
                 type = type,
                 xPct = obj.optDouble("xPct", 0.5).toFloat(),
                 yPct = obj.optDouble("yPct", 0.5).toFloat(),
@@ -311,7 +344,13 @@ data class HudElement(
                 turboCps = obj.optInt("turboCps", 12),
                 macroType = obj.optString("macroType", ""),
                 customMacro = obj.optString("customMacro", ""),
-                rotation = obj.optDouble("rotation", 0.0).toFloat()
+                rotation = obj.optDouble("rotation", 0.0).toFloat(),
+                swipeToAim = swipeToAim,
+                touchPadding = touchPadding,
+                showGhostShadow = showGhostShadow,
+                userExplicitGhostShadow = userExplicitGhostShadow,
+                maxDragDistance = maxDragDistance,
+                userExplicitDragDist = userExplicitDragDist
             )
         }
     }
@@ -336,8 +375,8 @@ object HudConfig {
 
         // Bumpers & Triggers
         list.add(HudElement(id = "lb", label = "LB (TAB)", key = "tab", type = ElementType.BUTTON, xPct = 0.10f, yPct = 0.11f, scale = 1.0f, zOrder = z++, shape = ButtonShape.ROUNDED_RECT))
-        list.add(HudElement(id = "lt", label = "LT (RMB)", key = "mouse_right", type = ElementType.BUTTON, xPct = 0.23f, yPct = 0.11f, scale = 1.0f, zOrder = z++, shape = ButtonShape.ROUNDED_RECT))
-        list.add(HudElement(id = "rt", label = "RT (LMB)", key = "mouse_left", type = ElementType.BUTTON, xPct = 0.77f, yPct = 0.11f, scale = 1.0f, zOrder = z++, shape = ButtonShape.ROUNDED_RECT))
+        list.add(HudElement(id = "lt", label = "LT (RMB)", key = "mouse_right", type = ElementType.BUTTON, xPct = 0.23f, yPct = 0.11f, scale = 1.0f, zOrder = z++, shape = ButtonShape.ROUNDED_RECT, swipeToAim = true))
+        list.add(HudElement(id = "rt", label = "RT (LMB)", key = "mouse_left", type = ElementType.BUTTON, xPct = 0.77f, yPct = 0.11f, scale = 1.0f, zOrder = z++, shape = ButtonShape.ROUNDED_RECT, swipeToAim = true))
         list.add(HudElement(id = "rb", label = "RB (Q)", key = "q", type = ElementType.BUTTON, xPct = 0.90f, yPct = 0.11f, scale = 1.0f, zOrder = z++, shape = ButtonShape.ROUNDED_RECT))
 
         // ABXY Diamond
@@ -379,7 +418,7 @@ object HudConfig {
 
         // Mid Left trigger & stick clicks
         list.add(HudElement(id = "rsb", label = "RSB (C)", key = "c", type = ElementType.BUTTON, xPct = 0.07f, yPct = 0.37f, scale = 0.95f, zOrder = z++, shape = ButtonShape.CIRCLE))
-        list.add(HudElement(id = "lt", label = "LT (LMB)", key = "mouse_left", type = ElementType.BUTTON, xPct = 0.25f, yPct = 0.33f, scale = 1.55f, zOrder = z++, shape = ButtonShape.CIRCLE))
+        list.add(HudElement(id = "lt", label = "LT (LMB)", key = "mouse_left", type = ElementType.BUTTON, xPct = 0.25f, yPct = 0.33f, scale = 1.55f, zOrder = z++, shape = ButtonShape.CIRCLE, swipeToAim = true))
 
         // Bottom Left Movement
         list.add(HudElement(id = "leftstick", label = "STICK", key = "", type = ElementType.STICK, xPct = 0.15f, yPct = 0.75f, scale = 1.15f, zOrder = z++))
@@ -388,7 +427,7 @@ object HudConfig {
 
         // Top Right cluster
         list.add(HudElement(id = "rb", label = "RB (Q)", key = "q", type = ElementType.BUTTON, xPct = 0.90f, yPct = 0.10f, scale = 1.10f, zOrder = z++, shape = ButtonShape.ROUNDED_RECT))
-        list.add(HudElement(id = "rt", label = "RT (RMB)", key = "mouse_right", type = ElementType.BUTTON, xPct = 0.74f, yPct = 0.20f, scale = 1.65f, zOrder = z++, shape = ButtonShape.CIRCLE))
+        list.add(HudElement(id = "rt", label = "RT (RMB)", key = "mouse_right", type = ElementType.BUTTON, xPct = 0.74f, yPct = 0.20f, scale = 1.65f, zOrder = z++, shape = ButtonShape.CIRCLE, swipeToAim = true))
 
         // Mid Right Actions & Extras
         list.add(HudElement(id = "custom_btn_1", label = "C2 (F)", key = "f", type = ElementType.BUTTON, xPct = 0.73f, yPct = 0.44f, scale = 0.95f, isCustom = true, customSlot = 1, zOrder = z++, shape = ButtonShape.CIRCLE))
@@ -629,6 +668,28 @@ object HudConfig {
 
     fun setHapticIntensity(context: Context, intensity: Float) {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit().putFloat(KEY_HAPTIC_INTENSITY, intensity).apply()
+    }
+
+    // Stick Sprint Mode
+    private const val KEY_STICK_SPRINT_MODE = "stick_sprint_mode"
+
+    fun isStickSprintMode(context: Context): Boolean {
+        return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getBoolean(KEY_STICK_SPRINT_MODE, true)
+    }
+
+    fun setStickSprintMode(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit().putBoolean(KEY_STICK_SPRINT_MODE, enabled).apply()
+    }
+
+    // Stick Touch Detection Scale
+    private const val KEY_STICK_TOUCH_SCALE = "stick_touch_scale"
+
+    fun getStickTouchScale(context: Context): Float {
+        return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getFloat(KEY_STICK_TOUCH_SCALE, 1.8f)
+    }
+
+    fun setStickTouchScale(context: Context, scale: Float) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit().putFloat(KEY_STICK_TOUCH_SCALE, scale).apply()
     }
 
     // Gyro Axis Modes

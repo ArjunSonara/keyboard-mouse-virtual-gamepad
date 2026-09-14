@@ -128,6 +128,11 @@ class MainActivity : Activity(), SensorEventListener {
         controllerView.onOpenKeySettingsRequested = { el ->
             showKeySettingsDialog(el)
         }
+        controllerView.stickSprintMode = HudConfig.isStickSprintMode(this)
+        controllerView.stickTouchScale = HudConfig.getStickTouchScale(this)
+        controllerView.onOpenStickSettingsRequested = { el ->
+            showStickSettingsDialog(el)
+        }
         controllerView.onLayoutChanged = {
             val keymap = HudConfig.extractKeymap(controllerView.elements)
             networkClient.sendKeymapSync(keymap)
@@ -951,6 +956,8 @@ class MainActivity : Activity(), SensorEventListener {
                 controllerView.selectedElement?.let { el ->
                     if (el.type == ElementType.BUTTON) {
                         showKeySettingsDialog(el)
+                    } else if (el.type == ElementType.STICK) {
+                        showStickSettingsDialog(el)
                     }
                 }
             }
@@ -1123,13 +1130,16 @@ class MainActivity : Activity(), SensorEventListener {
                 ElementType.BUTTON -> {
                     val typeStr = if (el.isCustom) "Custom Button ${el.customSlot + 1}" else "Button ${el.id.uppercase()}"
                     val keyDisplay = formatKeyDisplay(el.key)
-                    inspectorTitle.text = "Selected: $typeStr ${if (el.key.isNotEmpty()) "[Key: $keyDisplay]" else ""}"
+                    val aimTag = if (el.swipeToAim) " 🎯 Aim" else ""
+                    val hitboxTag = if (el.touchPadding > 1.0f) " 📏 ${String.format("%.1f", el.touchPadding)}x" else ""
+                    inspectorTitle.text = "Selected: $typeStr ${if (el.key.isNotEmpty()) "[Key: $keyDisplay]" else ""}$aimTag$hitboxTag"
 
                     buttonControlsRow.visibility = View.VISIBLE
                     dpadControlsRow.visibility = View.GONE
 
                     keySettingsButton.isEnabled = true
                     keySettingsButton.alpha = 1.0f
+                    keySettingsButton.text = "⚙️ Key Settings"
 
                     bindKeyButton.isEnabled = true
                     bindKeyButton.alpha = 1.0f
@@ -1166,11 +1176,14 @@ class MainActivity : Activity(), SensorEventListener {
                     deleteButton.alpha = if (el.isCustom) 1.0f else 0.4f
                 }
                 ElementType.STICK -> {
-                    inspectorTitle.text = "Selected: Movement Stick (Push > 80% to Sprint, drag to 🏃 to Lock Auto-Run)"
+                    val modeStr = if (controllerView.stickSprintMode) "⚡ Sprint Mode" else "🚶 Walk Mode"
+                    val touchStr = if (controllerView.stickTouchScale > 1.0f) " • Touch Radius: ${String.format("%.1f", controllerView.stickTouchScale)}x" else ""
+                    inspectorTitle.text = "Selected: Movement Stick ($modeStr$touchStr) — Tap ⚙ to change"
                     buttonControlsRow.visibility = View.VISIBLE
                     dpadControlsRow.visibility = View.GONE
-                    keySettingsButton.isEnabled = false
-                    keySettingsButton.alpha = 0.4f
+                    keySettingsButton.isEnabled = true
+                    keySettingsButton.alpha = 1.0f
+                    keySettingsButton.text = "⚙️ Stick Mode"
                     bindKeyButton.isEnabled = false
                     bindKeyButton.alpha = 0.4f
                     bindKeyButton.text = "WASD (Move)"
@@ -2068,6 +2081,274 @@ class MainActivity : Activity(), SensorEventListener {
             .show()
     }
 
+    private fun showStickSettingsDialog(targetEl: HudElement) {
+        controllerView.selectElement(targetEl)
+
+        var selectedSprint = controllerView.stickSprintMode
+        var selectedStickTouchScale = controllerView.stickTouchScale
+        val initialStickTouchScale = controllerView.stickTouchScale
+
+        val dialog = AlertDialog.Builder(this).create()
+        val dialogView = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(28, 20, 28, 20)
+            background = createCardDrawable(Color.parseColor("#161B22"), 20f, Color.parseColor("#30363D"), 2)
+        }
+
+        // Header
+        val headerRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, 0, 0, 10)
+        }
+        val titleText = TextView(this).apply {
+            text = "⚙️ Joystick Movement Mode"
+            textSize = 17f
+            setTextColor(Color.WHITE)
+            setTypeface(null, android.graphics.Typeface.BOLD)
+        }
+        headerRow.addView(titleText, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        val closeBtn = Button(this).apply {
+            text = "✕"
+            textSize = 16f
+            setTextColor(Color.parseColor("#8B949E"))
+            background = null
+            setPadding(8, 0, 8, 0)
+            setOnClickListener {
+                controllerView.stickTouchScale = initialStickTouchScale
+                dialog.dismiss()
+            }
+        }
+        headerRow.addView(closeBtn, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+        dialogView.addView(headerRow)
+
+        // Description
+        val descText = TextView(this).apply {
+            text = "Choose joystick behavior for movement during gameplay:"
+            textSize = 13f
+            setTextColor(Color.parseColor("#8B949E"))
+            setPadding(0, 0, 0, 14)
+        }
+        dialogView.addView(descText)
+
+        // Option 1: Sprint Mode Card
+        val sprintCard = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(16, 14, 16, 14)
+            isClickable = true
+            isFocusable = true
+        }
+        val sprintRadio = RadioButton(this).apply {
+            isClickable = false
+            isFocusable = false
+            buttonTintList = android.content.res.ColorStateList.valueOf(Color.parseColor("#58A6FF"))
+        }
+        sprintCard.addView(sprintRadio, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+
+        val sprintTextCol = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(14, 0, 0, 0)
+        }
+        val sprintTitle = TextView(this).apply {
+            text = "⚡ Sprint Mode (Auto-Sprint + Notch)"
+            textSize = 14f
+            setTextColor(Color.WHITE)
+            setTypeface(null, android.graphics.Typeface.BOLD)
+        }
+        val sprintDesc = TextView(this).apply {
+            text = "Auto-sprint (Shift) on tilt >80%. Drag stick into 🏃 notch to lock auto-run."
+            textSize = 12f
+            setTextColor(Color.parseColor("#8B949E"))
+            setPadding(0, 2, 0, 0)
+        }
+        sprintTextCol.addView(sprintTitle)
+        sprintTextCol.addView(sprintDesc)
+        sprintCard.addView(sprintTextCol, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+
+        dialogView.addView(sprintCard, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+            bottomMargin = 10
+        })
+
+        // Option 2: Walk / Normal Mode Card
+        val normalCard = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(16, 14, 16, 14)
+            isClickable = true
+            isFocusable = true
+        }
+        val normalRadio = RadioButton(this).apply {
+            isClickable = false
+            isFocusable = false
+            buttonTintList = android.content.res.ColorStateList.valueOf(Color.parseColor("#58A6FF"))
+        }
+        normalCard.addView(normalRadio, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+
+        val normalTextCol = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(14, 0, 0, 0)
+        }
+        val normalTitle = TextView(this).apply {
+            text = "🚶 Walk / Normal Mode"
+            textSize = 14f
+            setTextColor(Color.WHITE)
+            setTypeface(null, android.graphics.Typeface.BOLD)
+        }
+        val normalDesc = TextView(this).apply {
+            text = "Standard WASD movement only. No auto-sprint, no sprint notch lock."
+            textSize = 12f
+            setTextColor(Color.parseColor("#8B949E"))
+            setPadding(0, 2, 0, 0)
+        }
+        normalTextCol.addView(normalTitle)
+        normalTextCol.addView(normalDesc)
+        normalCard.addView(normalTextCol, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+
+        dialogView.addView(normalCard, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+
+        fun updateSelection() {
+            sprintRadio.isChecked = selectedSprint
+            normalRadio.isChecked = !selectedSprint
+
+            sprintCard.background = if (selectedSprint) {
+                createCardDrawable(Color.parseColor("#1B2A3D"), 12f, Color.parseColor("#58A6FF"), 2)
+            } else {
+                createCardDrawable(Color.parseColor("#0D1117"), 12f, Color.parseColor("#30363D"), 1)
+            }
+
+            normalCard.background = if (!selectedSprint) {
+                createCardDrawable(Color.parseColor("#1B2A3D"), 12f, Color.parseColor("#58A6FF"), 2)
+            } else {
+                createCardDrawable(Color.parseColor("#0D1117"), 12f, Color.parseColor("#30363D"), 1)
+            }
+        }
+
+        sprintCard.setOnClickListener {
+            selectedSprint = true
+            updateSelection()
+        }
+
+        normalCard.setOnClickListener {
+            selectedSprint = false
+            updateSelection()
+        }
+
+        updateSelection()
+
+        // Section: Joystick Outside Touch Detection Area (Catchment Zone)
+        val stickAreaLabel = TextView(this).apply {
+            text = "🎯 TOUCH DETECTION AREA (OUTSIDE DIRECTION):"
+            textSize = 12f
+            setTextColor(Color.parseColor("#58A6FF"))
+            setTypeface(null, android.graphics.Typeface.BOLD)
+            setPadding(0, 16, 0, 4)
+        }
+        dialogView.addView(stickAreaLabel)
+
+        val stickAreaDesc = TextView(this).apply {
+            text = "Tap near outside of joystick to automatically snap stick head in that direction and move immediately."
+            textSize = 11f
+            setTextColor(Color.parseColor("#8B949E"))
+            setPadding(0, 0, 0, 6)
+        }
+        dialogView.addView(stickAreaDesc)
+
+        val stickScaleDisplay = TextView(this).apply {
+            text = "Catchment Radius: ${String.format("%.2f", selectedStickTouchScale)}x" + if (selectedStickTouchScale > 1.0f) " (Active)" else " (Exact Boundary Only)"
+            textSize = 12f
+            setTextColor(Color.WHITE)
+            setPadding(0, 0, 0, 4)
+        }
+        dialogView.addView(stickScaleDisplay)
+
+        val stickSeekBar = SeekBar(this).apply {
+            max = 150 // 100 to 250 -> 1.00x to 2.50x
+            progress = ((selectedStickTouchScale * 100).toInt() - 100).coerceIn(0, 150)
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar?, prog: Int, fromUser: Boolean) {
+                    val scale = (prog + 100) / 100f
+                    stickScaleDisplay.text = "Catchment Radius: ${String.format("%.2f", scale)}x" + if (scale > 1.0f) " (Active)" else " (Exact Boundary Only)"
+                    if (fromUser) {
+                        selectedStickTouchScale = scale
+                        controllerView.stickTouchScale = scale
+                    }
+                }
+                override fun onStartTrackingTouch(sb: SeekBar?) {}
+                override fun onStopTrackingTouch(sb: SeekBar?) {}
+            })
+        }
+        dialogView.addView(stickSeekBar, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+
+        // Quick Preset Chips for Stick Touch Scale: 1.0x, 1.4x, 1.8x, 2.2x, 2.5x
+        val stickChipScroll = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            setPadding(0, 4, 0, 8)
+        }
+        val stickChipRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val stickPresets = listOf(
+            1.0f to "1.0x (Exact)",
+            1.4f to "1.4x",
+            1.8f to "1.8x (Default)",
+            2.2f to "2.2x",
+            2.5f to "2.5x (Wide)"
+        )
+        for ((scaleVal, scaleText) in stickPresets) {
+            val chip = Button(this).apply {
+                text = scaleText
+                textSize = 10f
+                setTextColor(Color.parseColor("#C9D1D9"))
+                background = createCardDrawable(Color.parseColor("#21262D"), 8f)
+                setPadding(12, 4, 12, 4)
+                setOnClickListener {
+                    stickSeekBar.progress = ((scaleVal * 100).toInt() - 100).coerceIn(0, 150)
+                    stickScaleDisplay.text = "Catchment Radius: ${String.format("%.2f", scaleVal)}x" + if (scaleVal > 1.0f) " (Active)" else " (Exact Boundary Only)"
+                    selectedStickTouchScale = scaleVal
+                    controllerView.stickTouchScale = scaleVal
+                }
+            }
+            stickChipRow.addView(chip, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { rightMargin = 6 })
+        }
+        stickChipScroll.addView(stickChipRow)
+        dialogView.addView(stickChipScroll)
+
+        // Apply button
+        val applyBtn = Button(this).apply {
+            text = "✅ Apply & Save"
+            textSize = 14f
+            setTextColor(Color.WHITE)
+            background = createCardDrawable(Color.parseColor("#238636"), 12f)
+            setPadding(24, 12, 24, 12)
+            setOnClickListener {
+                controllerView.stickSprintMode = selectedSprint
+                HudConfig.setStickSprintMode(this@MainActivity, selectedSprint)
+                controllerView.stickTouchScale = selectedStickTouchScale
+                HudConfig.setStickTouchScale(this@MainActivity, selectedStickTouchScale)
+                // Reset any active sprint state when switching to normal
+                if (!selectedSprint) {
+                    controllerView.resetSprint()
+                }
+                updateInspector(targetEl)
+                Toast.makeText(this@MainActivity,
+                    if (selectedSprint) "⚡ Sprint Mode enabled (${String.format("%.1f", selectedStickTouchScale)}x area)" else "🚶 Walk / Normal Mode enabled",
+                    Toast.LENGTH_SHORT).show()
+                dialog.dismiss()
+            }
+        }
+        val btnParams = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { topMargin = 18 }
+        dialogView.addView(applyBtn, btnParams)
+
+        dialog.setOnCancelListener {
+            controllerView.stickTouchScale = initialStickTouchScale
+        }
+        dialog.setView(dialogView)
+        dialog.window?.setBackgroundDrawableResource(android.R.color.transparent)
+        dialog.show()
+    }
+
     private fun showKeySettingsDialog(targetElement: HudElement? = null) {
         val selected = targetElement ?: controllerView.selectedElement ?: return
         if (selected.type != ElementType.BUTTON) return
@@ -2225,12 +2506,20 @@ class MainActivity : Activity(), SensorEventListener {
         val statsRotationText = TextView(this).apply { textSize = 11f; setTextColor(Color.parseColor("#C9D1D9")); setPadding(0, 2, 0, 2) }
         val statsScaleText = TextView(this).apply { textSize = 11f; setTextColor(Color.parseColor("#C9D1D9")); setPadding(0, 2, 0, 2) }
         val statsMacroText = TextView(this).apply { textSize = 11f; setTextColor(Color.parseColor("#C9D1D9")); setPadding(0, 2, 0, 2) }
+        val statsSwipeAimText = TextView(this).apply { textSize = 11f; setTextColor(Color.parseColor("#C9D1D9")); setPadding(0, 2, 0, 2) }
+        val statsTouchPaddingText = TextView(this).apply { textSize = 11f; setTextColor(Color.parseColor("#C9D1D9")); setPadding(0, 2, 0, 2) }
+        val statsGhostText = TextView(this).apply { textSize = 11f; setTextColor(Color.parseColor("#C9D1D9")); setPadding(0, 2, 0, 2) }
+        val statsDragDistanceText = TextView(this).apply { textSize = 11f; setTextColor(Color.parseColor("#C9D1D9")); setPadding(0, 2, 0, 2) }
 
         statsCard.addView(statsModeText)
         statsCard.addView(statsShapeText)
         statsCard.addView(statsRotationText)
         statsCard.addView(statsScaleText)
         statsCard.addView(statsMacroText)
+        statsCard.addView(statsSwipeAimText)
+        statsCard.addView(statsGhostText)
+        statsCard.addView(statsDragDistanceText)
+        statsCard.addView(statsTouchPaddingText)
         leftCol.addView(statsCard, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
 
         columnsLayout.addView(leftCol, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.05f))
@@ -2285,6 +2574,14 @@ class MainActivity : Activity(), SensorEventListener {
             statsRotationText.text = "• Rotation: ${selected.rotation.toInt()}°"
             statsScaleText.text = "• Scale: ${String.format("%.2f", selected.scale)}x"
             statsMacroText.text = "• Macro: " + if (selected.macroType.isNotEmpty() || selected.customMacro.isNotEmpty()) "Active ⚡" else "Disabled"
+            statsSwipeAimText.text = "• Swipe Aim: " + if (selected.swipeToAim) "Active 🎯" else "Disabled"
+            statsGhostText.text = "• Ghost Shadow: " + if (selected.showGhostShadow) "Enabled 👻" else "Disabled"
+            statsDragDistanceText.text = if (!selected.showGhostShadow) {
+                "• Max Drag Reach: Disabled (Ghost Shadow OFF)"
+            } else {
+                "• Max Drag Reach: ${String.format("%.1f", selected.maxDragDistance)}x" + if (selected.maxDragDistance == 0f) " (Stationary)" else ""
+            }
+            statsTouchPaddingText.text = "• Hitbox Area: ${String.format("%.2f", selected.touchPadding)}x" + if (selected.touchPadding > 1.0f) " (Nearby Auto-Detect)" else " (Exact Only)"
         }
 
         shapes.forEach { (shape, label) ->
@@ -2478,6 +2775,236 @@ class MainActivity : Activity(), SensorEventListener {
         turboContainer.addView(cpsChipScroll)
         rightCol.addView(turboContainer)
 
+        // --- SECTION: Swipe to Aim (Camera Rotation while holding) ---
+        val swipeAimHeader = TextView(this).apply {
+            text = "SWIPE TO AIM (CAMERA ROTATION):"
+            textSize = 11f
+            setTextColor(Color.parseColor("#58A6FF"))
+            setTypeface(null, android.graphics.Typeface.BOLD)
+            setPadding(0, 10, 0, 4)
+        }
+        rightCol.addView(swipeAimHeader)
+
+        val swipeCard = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(14, 10, 14, 10)
+            isClickable = true
+            isFocusable = true
+        }
+        val swipeCheckbox = CheckBox(this).apply {
+            isClickable = false
+            isFocusable = false
+            buttonTintList = android.content.res.ColorStateList.valueOf(Color.parseColor("#58A6FF"))
+            isChecked = selected.swipeToAim
+        }
+        swipeCard.addView(swipeCheckbox, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+
+        val swipeTextCol = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(10, 0, 0, 0)
+        }
+        val swipeTitle = TextView(this).apply {
+            text = "🎯 Swipe to Aim while Holding"
+            textSize = 12f
+            setTextColor(Color.WHITE)
+            setTypeface(null, android.graphics.Typeface.BOLD)
+        }
+        val swipeDesc = TextView(this).apply {
+            text = "Drag screen with same thumb while firing/holding this key to control aim & recoil."
+            textSize = 10f
+            setTextColor(Color.parseColor("#8B949E"))
+        }
+        swipeTextCol.addView(swipeTitle)
+        swipeTextCol.addView(swipeDesc)
+        swipeCard.addView(swipeTextCol, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+
+        fun updateSwipeCard() {
+            swipeCheckbox.isChecked = selected.swipeToAim
+            swipeCard.background = if (selected.swipeToAim) {
+                createCardDrawable(Color.parseColor("#1B2A3D"), 10f, Color.parseColor("#58A6FF"), 1)
+            } else {
+                createCardDrawable(Color.parseColor("#0D1117"), 10f, Color.parseColor("#30363D"), 1)
+            }
+        }
+        updateSwipeCard()
+
+        swipeCard.setOnClickListener {
+            val newState = !selected.swipeToAim
+            controllerView.updateSelectedSwipeToAim(newState)
+            updateSwipeCard()
+            updateStatsCard()
+            updateInspector(selected)
+            HudConfig.saveLayout(this@MainActivity, controllerView.elements)
+            Toast.makeText(
+                this@MainActivity,
+                if (newState) "🎯 Swipe-to-Aim enabled for this button" else "Swipe-to-Aim disabled",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
+        rightCol.addView(swipeCard)
+
+        // --- SECTION: Ghost Shadow on Drag ---
+        val ghostCard = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(14, 10, 14, 10)
+            isClickable = true
+            isFocusable = true
+        }
+        val ghostCheckbox = CheckBox(this).apply {
+            isClickable = false
+            isFocusable = false
+            buttonTintList = android.content.res.ColorStateList.valueOf(Color.parseColor("#58A6FF"))
+            isChecked = selected.showGhostShadow
+        }
+        ghostCard.addView(ghostCheckbox, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+
+        val ghostTextCol = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(10, 0, 0, 0)
+        }
+        val ghostTitle = TextView(this).apply {
+            text = "👻 Ghost Shadow on Drag"
+            textSize = 12f
+            setTextColor(Color.WHITE)
+            setTypeface(null, android.graphics.Typeface.BOLD)
+        }
+        val ghostDesc = TextView(this).apply {
+            text = "Displays resting shadow at home position while dragging button face."
+            textSize = 10f
+            setTextColor(Color.parseColor("#8B949E"))
+        }
+        ghostTextCol.addView(ghostTitle)
+        ghostTextCol.addView(ghostDesc)
+        ghostCard.addView(ghostTextCol, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+
+        var updateDragControlsState: (() -> Unit)? = null
+
+        fun updateGhostCard() {
+            ghostCheckbox.isChecked = selected.showGhostShadow
+            ghostCard.background = if (selected.showGhostShadow) {
+                createCardDrawable(Color.parseColor("#1B2A3D"), 10f, Color.parseColor("#58A6FF"), 1)
+            } else {
+                createCardDrawable(Color.parseColor("#0D1117"), 10f, Color.parseColor("#30363D"), 1)
+            }
+            updateDragControlsState?.invoke()
+        }
+
+        ghostCard.setOnClickListener {
+            val newState = !selected.showGhostShadow
+            controllerView.updateSelectedGhostShadow(newState)
+            updateGhostCard()
+            updateStatsCard()
+            updateInspector(selected)
+            HudConfig.saveLayout(this@MainActivity, controllerView.elements)
+            Toast.makeText(
+                this@MainActivity,
+                if (newState) "👻 Ghost Shadow & Drag enabled for this key" else "Ghost Shadow & Drag disabled",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
+        rightCol.addView(ghostCard, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { topMargin = 6 })
+
+        // --- SECTION: Max Drag Distance (Visual Drag Reach from Center) ---
+        val dragDistHeader = TextView(this).apply {
+            text = "MAX DRAG DISTANCE (FROM CENTER):"
+            textSize = 11f
+            setTextColor(Color.parseColor("#58A6FF"))
+            setTypeface(null, android.graphics.Typeface.BOLD)
+            setPadding(0, 10, 0, 4)
+        }
+        rightCol.addView(dragDistHeader)
+
+        val dragDistDesc = TextView(this).apply {
+            text = "Controls how far the button face can slide from its center while swiping (requires Ghost Shadow ON)."
+            textSize = 10f
+            setTextColor(Color.parseColor("#8B949E"))
+            setPadding(0, 0, 0, 4)
+        }
+        rightCol.addView(dragDistDesc)
+
+        val dragDistLabel = TextView(this).apply {
+            textSize = 11f
+            setTextColor(Color.WHITE)
+            setPadding(0, 2, 0, 4)
+        }
+        rightCol.addView(dragDistLabel)
+
+        val dragDistSeekBar = SeekBar(this).apply {
+            max = 50 // 0 to 50 -> 0.0x to 5.0x
+            progress = (selected.maxDragDistance * 10).toInt().coerceIn(0, 50)
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar?, prog: Int, fromUser: Boolean) {
+                    val dist = prog / 10f
+                    if (selected.showGhostShadow) {
+                        dragDistLabel.text = "📏 DRAG REACH: ${String.format("%.1f", dist)}x radius" + if (dist == 0f) " (Stationary / Locked)" else ""
+                    }
+                    if (fromUser) {
+                        controllerView.updateSelectedMaxDragDistance(dist)
+                        updateStatsCard()
+                        updateInspector(selected)
+                    }
+                }
+                override fun onStartTrackingTouch(sb: SeekBar?) {}
+                override fun onStopTrackingTouch(sb: SeekBar?) {}
+            })
+        }
+        rightCol.addView(dragDistSeekBar, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+
+        // Quick Preset Chips for Max Drag Distance
+        val dragChipScroll = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            setPadding(0, 4, 0, 8)
+        }
+        val dragChipRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val dragPresets = listOf(
+            0.0f to "0.0x (Locked)",
+            0.4f to "0.4x (Short)",
+            0.8f to "0.8x (Default)",
+            1.2f to "1.2x",
+            1.8f to "1.8x",
+            2.8f to "2.8x (Far)"
+        )
+        for ((dVal, dLabel) in dragPresets) {
+            val chip = Button(this).apply {
+                text = dLabel
+                textSize = 9f
+                setTextColor(Color.parseColor("#C9D1D9"))
+                background = createCardDrawable(Color.parseColor("#21262D"), 8f)
+                setPadding(10, 3, 10, 3)
+                setOnClickListener {
+                    dragDistSeekBar.progress = (dVal * 10).toInt().coerceIn(0, 50)
+                    if (selected.showGhostShadow) {
+                        dragDistLabel.text = "📏 DRAG REACH: ${String.format("%.1f", dVal)}x radius" + if (dVal == 0f) " (Stationary / Locked)" else ""
+                    }
+                    controllerView.updateSelectedMaxDragDistance(dVal)
+                    updateStatsCard()
+                    updateInspector(selected)
+                }
+            }
+            dragChipRow.addView(chip, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { rightMargin = 6 })
+        }
+        dragChipScroll.addView(dragChipRow)
+        rightCol.addView(dragChipScroll)
+
+        updateDragControlsState = {
+            val enabled = selected.showGhostShadow
+            dragDistSeekBar.isEnabled = enabled
+            dragDistSeekBar.alpha = if (enabled) 1.0f else 0.35f
+            dragChipScroll.alpha = if (enabled) 1.0f else 0.35f
+            for (i in 0 until dragChipRow.childCount) {
+                dragChipRow.getChildAt(i).isEnabled = enabled
+            }
+            dragDistLabel.text = if (!enabled) {
+                "📏 DRAG REACH: Disabled (Turn ON Ghost Shadow above to enable drag)"
+            } else {
+                val dist = selected.maxDragDistance
+                "📏 DRAG REACH: ${String.format("%.1f", dist)}x radius" + if (dist == 0f) " (Stationary / Locked)" else ""
+            }
+        }
+        updateGhostCard()
+
         // --- SECTION D: Size / Scale ---
         val scaleLabel = TextView(this).apply {
             text = "BUTTON SIZE: ${String.format("%.2f", selected.scale)}x"
@@ -2507,7 +3034,86 @@ class MainActivity : Activity(), SensorEventListener {
         }
         rightCol.addView(sizeSeekBar, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
 
-        // --- SECTION E: Macro Studio & Delete Buttons ---
+        // --- SECTION E: Touch Detection Area (Proximity Hitbox) ---
+        val touchAreaHeader = TextView(this).apply {
+            text = "TOUCH DETECTION AREA (PROXIMITY HITBOX):"
+            textSize = 11f
+            setTextColor(Color.parseColor("#58A6FF"))
+            setTypeface(null, android.graphics.Typeface.BOLD)
+            setPadding(0, 10, 0, 4)
+        }
+        rightCol.addView(touchAreaHeader)
+
+        val touchAreaDesc = TextView(this).apply {
+            text = "Tap near or slightly outside the button to still trigger it automatically."
+            textSize = 10f
+            setTextColor(Color.parseColor("#8B949E"))
+            setPadding(0, 0, 0, 4)
+        }
+        rightCol.addView(touchAreaDesc)
+
+        val touchAreaLabel = TextView(this).apply {
+            text = "🎯 HITBOX RADIUS: ${String.format("%.2f", selected.touchPadding)}x" + if (selected.touchPadding > 1.0f) " (Nearby Auto-Detect)" else " (Exact Only)"
+            textSize = 11f
+            setTextColor(Color.WHITE)
+            setPadding(0, 2, 0, 4)
+        }
+        rightCol.addView(touchAreaLabel)
+
+        val touchAreaSeekBar = SeekBar(this).apply {
+            max = 150 // 100 to 250 -> 1.00x to 2.50x
+            progress = ((selected.touchPadding * 100).toInt() - 100).coerceIn(0, 150)
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar?, prog: Int, fromUser: Boolean) {
+                    val pad = (prog + 100) / 100f
+                    touchAreaLabel.text = "🎯 HITBOX RADIUS: ${String.format("%.2f", pad)}x" + if (pad > 1.0f) " (Nearby Auto-Detect)" else " (Exact Only)"
+                    if (fromUser) {
+                        controllerView.updateSelectedTouchPadding(pad)
+                        updateStatsCard()
+                        updateInspector(selected)
+                    }
+                }
+                override fun onStartTrackingTouch(sb: SeekBar?) {}
+                override fun onStopTrackingTouch(sb: SeekBar?) {}
+            })
+        }
+        rightCol.addView(touchAreaSeekBar, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+
+        // Quick Preset Chips for Touch Detection Area
+        val touchChipScroll = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            setPadding(0, 4, 0, 8)
+        }
+        val touchChipRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val touchPresets = listOf(
+            1.0f to "1.0x (Exact)",
+            1.25f to "1.25x",
+            1.4f to "1.4x (Default)",
+            1.8f to "1.8x",
+            2.0f to "2.0x",
+            2.5f to "2.5x (Wide)"
+        )
+        for ((padVal, padText) in touchPresets) {
+            val chip = Button(this).apply {
+                text = padText
+                textSize = 9f
+                setTextColor(Color.parseColor("#C9D1D9"))
+                background = createCardDrawable(Color.parseColor("#21262D"), 8f)
+                setPadding(10, 3, 10, 3)
+                setOnClickListener {
+                    touchAreaSeekBar.progress = ((padVal * 100).toInt() - 100).coerceIn(0, 150)
+                    touchAreaLabel.text = "🎯 HITBOX RADIUS: ${String.format("%.2f", padVal)}x" + if (padVal > 1.0f) " (Nearby Auto-Detect)" else " (Exact Only)"
+                    controllerView.updateSelectedTouchPadding(padVal)
+                    updateStatsCard()
+                    updateInspector(selected)
+                }
+            }
+            touchChipRow.addView(chip, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { rightMargin = 6 })
+        }
+        touchChipScroll.addView(touchChipRow)
+        rightCol.addView(touchChipScroll)
+
+        // --- SECTION F: Macro Studio & Delete Buttons ---
         val actionRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             setPadding(0, 10, 0, 0)
@@ -2570,6 +3176,7 @@ class MainActivity : Activity(), SensorEventListener {
                     controllerView.updateSelectedLabel(newName)
                 }
                 updateInspector(selected)
+                HudConfig.saveLayout(this@MainActivity, controllerView.elements)
                 dialog.dismiss()
             }
         }

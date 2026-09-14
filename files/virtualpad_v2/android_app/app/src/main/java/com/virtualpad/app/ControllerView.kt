@@ -138,6 +138,25 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
         isAntiAlias = true
     }
 
+    private val ghostFillPaint = Paint().apply {
+        color = Color.parseColor("#15FFFFFF")
+        isAntiAlias = true
+    }
+    private val ghostOutlinePaint = Paint().apply {
+        color = Color.parseColor("#5558A6FF")
+        style = Paint.Style.STROKE
+        strokeWidth = 3f
+        pathEffect = DashPathEffect(floatArrayOf(8f, 8f), 0f)
+        isAntiAlias = true
+    }
+    private val touchAreaGuidePaint = Paint().apply {
+        color = Color.parseColor("#3358A6FF")
+        style = Paint.Style.STROKE
+        strokeWidth = 2.5f
+        pathEffect = DashPathEffect(floatArrayOf(8f, 8f), 0f)
+        isAntiAlias = true
+    }
+
     // --- State & Layout ---
     val elements = mutableListOf<HudElement>()
     private var layoutReady = false
@@ -154,6 +173,10 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
             if (value) {
                 // Clear any held input when entering edit mode to avoid stuck keys on PC
                 pointerZone.clear()
+                buttonPointerLastX.clear()
+                buttonPointerLastY.clear()
+                buttonTouchStart.clear()
+                buttonTouchCurrent.clear()
                 latchedButtons.clear()
                 stopAllTurbo()
                 isAutoRunLocked = false
@@ -181,6 +204,10 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
     // Gameplay input tracking
     private var state = ControllerState()
     private val pointerZone = HashMap<Int, String>()
+    private val buttonPointerLastX = HashMap<Int, Float>()
+    private val buttonPointerLastY = HashMap<Int, Float>()
+    private val buttonTouchStart = HashMap<String, Pair<Float, Float>>()
+    private val buttonTouchCurrent = HashMap<String, Pair<Float, Float>>()
     private var lookPointerId: Int? = null
     private var lastLookX = 0f
     private var lastLookY = 0f
@@ -194,10 +221,42 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
     private val activeTurboRunnables = HashMap<String, Runnable>()
     private val turboPulseState = HashMap<String, Boolean>()
 
+    private var visualStickX = 0f
+    private var visualStickY = 0f
+
     // Sprint Lock & Auto-Shift
     var isAutoRunLocked = false
     var isStickInLockNotch = false
     var autoShiftActive = false
+
+    // Stick Mode: true = Sprint Mode (auto-sprint on forward tilt), false = Normal Mode (strictly 8-direction WASD, no shift)
+    var stickSprintMode: Boolean = true
+        set(value) {
+            field = value
+            if (!value) {
+                resetSprint()
+            }
+            invalidate()
+        }
+    var stickTouchScale: Float = 1.8f
+        set(value) {
+            field = value.coerceIn(1.0f, 2.5f)
+            invalidate()
+        }
+    var onOpenStickSettingsRequested: ((HudElement) -> Unit)? = null
+
+    fun resetSprint() {
+        isAutoRunLocked = false
+        isStickInLockNotch = false
+        if (autoShiftActive) {
+            setSprintActive(false)
+        }
+        visualStickX = 0f
+        visualStickY = 0f
+        state = state.copy(stickX = 0f, stickY = 0f)
+        emitState()
+        invalidate()
+    }
 
     // Scroll Wheel
     var onWheelScroll: ((Int) -> Unit)? = null
@@ -221,6 +280,7 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
     init {
         isHapticFeedbackEnabled = true
         hudOpacity = HudConfig.getHudOpacity(context)
+        stickTouchScale = HudConfig.getStickTouchScale(context)
         elements.addAll(HudConfig.loadLayout(context))
     }
 
@@ -228,7 +288,7 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
     private var stickAtEdge: Boolean = false
 
     val isLookActive: Boolean
-        get() = lookPointerId != null
+        get() = lookPointerId != null || buttonPointerLastX.isNotEmpty()
 
     fun isButtonHeld(btn: Btn): Boolean {
         return (state.buttons and (1 shl btn.bit)) != 0
@@ -315,27 +375,30 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
         val notchY = cy - r * 1.55f
         val notchR = r * 0.38f
 
-        // Draw track stem leading to the Auto-Run notch
-        canvas.drawLine(cx, cy - r, notchX, notchY + notchR, outlinePaint)
+        // Only draw sprint notch & track stem in Sprint Mode
+        if (stickSprintMode) {
+            // Draw track stem leading to the Auto-Run notch
+            canvas.drawLine(cx, cy - r, notchX, notchY + notchR, outlinePaint)
 
-        // Draw Auto-Run Lock Notch Circle
-        val notchFill = if (isAutoRunLocked || isStickInLockNotch) fillActivePaint else fillPaint
-        val notchOutline = when {
-            isAutoRunLocked -> toggleLatchedPaint
-            isStickInLockNotch -> turboGlowPaint
-            else -> outlinePaint
-        }
-        canvas.drawCircle(notchX, notchY, notchR, notchFill)
-        canvas.drawCircle(notchX, notchY, notchR, notchOutline)
+            // Draw Auto-Run Lock Notch Circle
+            val notchFill = if (isAutoRunLocked || isStickInLockNotch) fillActivePaint else fillPaint
+            val notchOutline = when {
+                isAutoRunLocked -> toggleLatchedPaint
+                isStickInLockNotch -> turboGlowPaint
+                else -> outlinePaint
+            }
+            canvas.drawCircle(notchX, notchY, notchR, notchFill)
+            canvas.drawCircle(notchX, notchY, notchR, notchOutline)
 
-        // Draw 🏃 Icon inside notch
-        val iconPaint = Paint().apply {
-            color = Color.WHITE
-            textSize = notchR * 1.1f
-            textAlign = Paint.Align.CENTER
-            isAntiAlias = true
+            // Draw 🏃 Icon inside notch
+            val iconPaint = Paint().apply {
+                color = Color.WHITE
+                textSize = notchR * 1.1f
+                textAlign = Paint.Align.CENTER
+                isAntiAlias = true
+            }
+            canvas.drawText("🏃", notchX, notchY + notchR * 0.35f, iconPaint)
         }
-        canvas.drawText("🏃", notchX, notchY + notchR * 0.35f, iconPaint)
 
         // Main stick base circle
         canvas.drawCircle(cx, cy, r, fillPaint)
@@ -343,23 +406,50 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
 
         // Thumb stick head
         val headX = when {
-            isAutoRunLocked || isStickInLockNotch -> notchX
-            !isEditMode -> cx + state.stickX * r * 0.5f
+            stickSprintMode && (isAutoRunLocked || isStickInLockNotch) -> notchX
+            !isEditMode -> cx + visualStickX * r * 0.5f
             else -> cx
         }
         val headY = when {
-            isAutoRunLocked || isStickInLockNotch -> notchY
-            !isEditMode -> cy + state.stickY * r * 0.5f
+            stickSprintMode && (isAutoRunLocked || isStickInLockNotch) -> notchY
+            !isEditMode -> cy + visualStickY * r * 0.5f
             else -> cy
         }
-        canvas.drawCircle(headX, headY, r * 0.45f, if (isAutoRunLocked) customFillActivePaint else fillActivePaint)
-        if (isAutoRunLocked) {
+        canvas.drawCircle(headX, headY, r * 0.45f, if (isAutoRunLocked && stickSprintMode) customFillActivePaint else fillActivePaint)
+        if (isAutoRunLocked && stickSprintMode) {
             canvas.drawCircle(headX, headY, r * 0.45f + 2f, toggleLatchedPaint)
         }
 
         textPaint.textSize = min(W, H) * 0.035f * el.scale
-        val stickLabel = if (isAutoRunLocked) "AUTO RUN 🔒" else el.label.ifEmpty { "STICK" }
+        val stickLabel = when {
+            isAutoRunLocked && stickSprintMode -> "AUTO RUN 🔒"
+            stickSprintMode -> el.label.ifEmpty { "STICK" }
+            else -> el.label.ifEmpty { "STICK" }
+        }
         canvas.drawText(stickLabel, cx, cy + r * 0.85f, textPaint)
+
+        // Mode indicator below label
+        subTextPaint.textSize = min(W, H) * 0.018f * el.scale
+        val modeLabel = if (stickSprintMode) "⚡ Sprint" else "🚶 Normal"
+        canvas.drawText(modeLabel, cx, cy + r * 1.05f, subTextPaint)
+
+        // In Edit Mode: Draw mini gear ⚙ icon badge at bottom-right of the stick
+        if (isEditMode) {
+            val badgeR = (r * 0.22f).coerceIn(15f, 30f)
+            val badgeX = cx + r * 0.72f
+            val badgeY = cy + r * 0.72f
+            canvas.drawCircle(badgeX, badgeY, badgeR, gearBadgeBgPaint)
+            canvas.drawCircle(badgeX, badgeY, badgeR, gearBadgeBorderPaint)
+            gearBadgeIconPaint.textSize = badgeR * 1.25f
+            val fm = gearBadgeIconPaint.fontMetrics
+            val baseline = badgeY - (fm.ascent + fm.descent) / 2f
+            canvas.drawText("⚙", badgeX, baseline, gearBadgeIconPaint)
+
+            // Outer detection guide
+            if (el == selectedElement && stickTouchScale > 1.0f) {
+                canvas.drawCircle(cx, cy, r * stickTouchScale, touchAreaGuidePaint)
+            }
+        }
     }
 
     private fun formatKeyDisplay(key: String): String = when (key.lowercase()) {
@@ -391,14 +481,81 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
     private fun drawButtonElement(canvas: Canvas, el: HudElement, W: Float, H: Float) {
         val cx = el.xPct * W
         val cy = el.yPct * H
+        val zoneKey = getZoneKey(el)
+
+        // Drag displacement calculation (Free Fire / mobile drag-to-aim effect)
+        val touchStart = buttonTouchStart[zoneKey]
+        val touchCurr = buttonTouchCurrent[zoneKey]
+        val r = getButtonRadius(el, H)
+        val (dragDx, dragDy) = if (touchStart != null && touchCurr != null && !isEditMode && el.showGhostShadow && el.maxDragDistance > 0f) {
+            val startDistFromCenter = hypot((touchStart.first - cx).toDouble(), (touchStart.second - cy).toDouble()).toFloat()
+            val (rawDx, rawDy) = if (startDistFromCenter > r) {
+                // Thumb fell in the hitbox area outside the button circle:
+                // Automatically drag from center towards the thumb!
+                Pair(touchCurr.first - cx, touchCurr.second - cy)
+            } else {
+                // Thumb touched inside the button:
+                // Drag displacement tracks finger movement from touch start
+                Pair(touchCurr.first - touchStart.first, touchCurr.second - touchStart.second)
+            }
+            val dist = hypot(rawDx.toDouble(), rawDy.toDouble()).toFloat()
+            val maxDrag = r * el.maxDragDistance
+            if (dist > maxDrag && dist > 0f) {
+                Pair(rawDx * (maxDrag / dist), rawDy * (maxDrag / dist))
+            } else {
+                Pair(rawDx, rawDy)
+            }
+        } else {
+            Pair(0f, 0f)
+        }
+        val isDragging = hypot(dragDx.toDouble(), dragDy.toDouble()).toFloat() > 4f
+
+        // 1. If dragging, draw the stationary Ghost Shadow at the home position (cx, cy)
+        if (isDragging && el.showGhostShadow) {
+            val hasRot = el.rotation != 0f
+            if (hasRot) {
+                canvas.save()
+                canvas.rotate(el.rotation, cx, cy)
+            }
+            when (el.shape) {
+                ButtonShape.CIRCLE -> {
+                    val r = getButtonRadius(el, H)
+                    canvas.drawCircle(cx, cy, r, ghostFillPaint)
+                    canvas.drawCircle(cx, cy, r, ghostOutlinePaint)
+                }
+                ButtonShape.SQUARE -> {
+                    val rect = getButtonSquare(el, cx, cy, H)
+                    canvas.drawRoundRect(rect, 14f, 14f, ghostFillPaint)
+                    canvas.drawRoundRect(rect, 14f, 14f, ghostOutlinePaint)
+                }
+                ButtonShape.ROUNDED_RECT -> {
+                    val rect = getButtonRect(el, cx, cy, W, H)
+                    canvas.drawRoundRect(rect, 18f, 18f, ghostFillPaint)
+                    canvas.drawRoundRect(rect, 18f, 18f, ghostOutlinePaint)
+                }
+            }
+            if (hasRot) {
+                canvas.restore()
+            }
+        }
+
+        // 2. In Edit Mode: If selected and has touch area padding > 1.0x, draw the touch detection area guide
+        if (isEditMode && el == selectedElement && el.touchPadding > 1.0f) {
+            val r = getButtonRadius(el, H) * el.touchPadding
+            canvas.drawCircle(cx, cy, r, touchAreaGuidePaint)
+        }
+
+        // 3. Draw the actual active button (at home pos if not dragging, or dragged pos if dragging)
+        val drawCx = cx + dragDx
+        val drawCy = cy + dragDy
+
         val hasRotation = el.rotation != 0f
         if (hasRotation) {
             canvas.save()
-            canvas.rotate(el.rotation, cx, cy)
+            canvas.rotate(el.rotation, drawCx, drawCy)
         }
 
         val active = isButtonActive(el)
-        val zoneKey = getZoneKey(el)
         val isLatched = el.isToggle && latchedButtons.contains(zoneKey)
         val isTurboPulse = el.isTurbo && (turboPulseState[zoneKey] == true)
         val isMacroActive = activeMacroButtons.contains(el.id)
@@ -414,18 +571,18 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
         when (el.shape) {
             ButtonShape.CIRCLE -> {
                 val r = getButtonRadius(el, H)
-                canvas.drawCircle(cx, cy, r, currentFill)
-                canvas.drawCircle(cx, cy, r, currentOutline)
+                canvas.drawCircle(drawCx, drawCy, r, currentFill)
+                canvas.drawCircle(drawCx, drawCy, r, currentOutline)
                 if (isMacroActive) {
-                    canvas.drawCircle(cx, cy, r + 2f, macroGlowPaint)
+                    canvas.drawCircle(drawCx, drawCy, r + 2f, macroGlowPaint)
                 } else if (isLatched) {
-                    canvas.drawCircle(cx, cy, r + 2f, toggleLatchedPaint)
+                    canvas.drawCircle(drawCx, drawCy, r + 2f, toggleLatchedPaint)
                 } else if (isTurboPulse) {
-                    canvas.drawCircle(cx, cy, r + 2f, turboGlowPaint)
+                    canvas.drawCircle(drawCx, drawCy, r + 2f, turboGlowPaint)
                 }
             }
             ButtonShape.SQUARE -> {
-                val rect = getButtonSquare(el, cx, cy, H)
+                val rect = getButtonSquare(el, drawCx, drawCy, H)
                 canvas.drawRoundRect(rect, 14f, 14f, currentFill)
                 canvas.drawRoundRect(rect, 14f, 14f, currentOutline)
                 if (isMacroActive) {
@@ -437,7 +594,7 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
                 }
             }
             ButtonShape.ROUNDED_RECT -> {
-                val rect = getButtonRect(el, cx, cy, W, H)
+                val rect = getButtonRect(el, drawCx, drawCy, W, H)
                 canvas.drawRoundRect(rect, 18f, 18f, currentFill)
                 canvas.drawRoundRect(rect, 18f, 18f, currentOutline)
                 if (isMacroActive) {
@@ -449,7 +606,7 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
                 }
             }
         }
-        drawButtonLabels(canvas, el, cx, cy, W, H)
+        drawButtonLabels(canvas, el, drawCx, drawCy, W, H)
 
         if (hasRotation) {
             canvas.restore()
@@ -483,8 +640,13 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
             canvas.drawText(el.label, cx, cy + 10f, textPaint)
         }
 
-        // Visual badge indicators (⚡M for Macro, 🔒 for Toggle, ⚡ for Turbo)
+        // Visual badge indicators (⚡M for Macro, 🔒 for Toggle, ⚡ for Turbo, 🎯 for Swipe Aim)
         val r = getButtonRadius(el, H)
+        if (el.swipeToAim) {
+            badgePaint.textSize = min(W, H) * 0.019f * el.scale
+            badgePaint.color = Color.parseColor("#58A6FF")
+            canvas.drawText("🎯", cx - r * 0.55f, cy - r * 0.40f, badgePaint)
+        }
         if (el.macroType.isNotEmpty() || el.customMacro.isNotEmpty()) {
             val isRunning = activeMacroButtons.contains(el.id)
             badgePaint.textSize = min(W, H) * 0.022f * el.scale
@@ -739,6 +901,8 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
         val W = width.toFloat()
         val H = height.toFloat()
         val sortedList = elements.sortedByDescending { it.zOrder }
+
+        // --- PASS 1: Exact Hit Testing ---
         for (el in sortedList) {
             val cx = el.xPct * W
             val cy = el.yPct * H
@@ -748,7 +912,9 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
                     val notchX = cx
                     val notchY = cy - r * 1.55f
                     val notchR = r * 0.38f
-                    if (hypot(x - cx, y - cy) <= r || hypot(x - notchX, y - notchY) <= notchR * 1.6f) return el
+                    val hitMain = hypot(x - cx, y - cy) <= r
+                    val hitNotch = stickSprintMode && hypot(x - notchX, y - notchY) <= notchR * 1.6f
+                    if (hitMain || hitNotch) return el
                 }
                 ElementType.DPAD -> {
                     val r = H * 0.14f * el.scale
@@ -786,7 +952,61 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
                 }
             }
         }
-        return null
+
+        // In Edit Mode, only exact hits count (so dragging and positioning elements is pixel-precise)
+        if (isEditMode) return null
+
+        // --- PASS 2: Proximity Hit Testing (Nearby Touch Detection Area & Joystick Outer Catchment Zone) ---
+        var bestElement: HudElement? = null
+        var bestDistance = Float.MAX_VALUE
+
+        for (el in sortedList) {
+            val cx = el.xPct * W
+            val cy = el.yPct * H
+            when (el.type) {
+                ElementType.BUTTON -> {
+                    if (el.touchPadding > 1.0f) {
+                        val (testX, testY) = if (el.rotation != 0f) {
+                            val rad = Math.toRadians(-el.rotation.toDouble())
+                            val cos = Math.cos(rad).toFloat()
+                            val sin = Math.sin(rad).toFloat()
+                            val dx = x - cx
+                            val dy = y - cy
+                            Pair(cx + dx * cos - dy * sin, cy + dx * sin + dy * cos)
+                        } else {
+                            Pair(x, y)
+                        }
+                        val r = getButtonRadius(el, H)
+                        val expandedR = r * el.touchPadding
+                        val dist = hypot(testX - cx, testY - cy)
+                        if (dist <= expandedR) {
+                            val distFromEdge = dist - r
+                            if (distFromEdge < bestDistance) {
+                                bestDistance = distFromEdge
+                                bestElement = el
+                            }
+                        }
+                    }
+                }
+                ElementType.STICK -> {
+                    if (stickTouchScale > 1.0f) {
+                        val r = H * 0.16f * el.scale
+                        val expandedR = r * stickTouchScale
+                        val dist = hypot(x - cx, y - cy)
+                        if (dist <= expandedR) {
+                            val distFromEdge = dist - r
+                            if (distFromEdge < bestDistance) {
+                                bestDistance = distFromEdge
+                                bestElement = el
+                            }
+                        }
+                    }
+                }
+                else -> {}
+            }
+        }
+
+        return bestElement
     }
 
     private fun getStockBtn(id: String): Btn? = when (id) {
@@ -803,6 +1023,52 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
         "small_icon" -> Btn.SMALL_ICON
         "hamburger_icon" -> Btn.HAMBURGER_ICON
         else -> null
+    }
+
+    private fun isPointInsideButton(el: HudElement, x: Float, y: Float, paddingMultiplier: Float = 1.0f): Boolean {
+        val W = width.toFloat()
+        val H = height.toFloat()
+        val cx = el.xPct * W
+        val cy = el.yPct * H
+        val (testX, testY) = if (el.rotation != 0f) {
+            val rad = Math.toRadians(-el.rotation.toDouble())
+            val cos = Math.cos(rad).toFloat()
+            val sin = Math.sin(rad).toFloat()
+            val dx = x - cx
+            val dy = y - cy
+            Pair(cx + dx * cos - dy * sin, cy + dx * sin + dy * cos)
+        } else {
+            Pair(x, y)
+        }
+        val effPadding = kotlin.math.max(el.touchPadding, 1.0f) * paddingMultiplier
+        return when (el.shape) {
+            ButtonShape.CIRCLE -> {
+                val r = getButtonRadius(el, H) * effPadding
+                hypot((testX - cx).toDouble(), (testY - cy).toDouble()).toFloat() <= r
+            }
+            ButtonShape.SQUARE -> {
+                val baseRect = getButtonSquare(el, cx, cy, H)
+                if (effPadding > 1.0f) {
+                    val expandX = (baseRect.width() * (effPadding - 1.0f)) / 2f
+                    val expandY = (baseRect.height() * (effPadding - 1.0f)) / 2f
+                    val rect = RectF(baseRect.left - expandX, baseRect.top - expandY, baseRect.right + expandX, baseRect.bottom + expandY)
+                    rect.contains(testX, testY)
+                } else {
+                    baseRect.contains(testX, testY)
+                }
+            }
+            ButtonShape.ROUNDED_RECT -> {
+                val baseRect = getButtonRect(el, cx, cy, W, H)
+                if (effPadding > 1.0f) {
+                    val expandX = (baseRect.width() * (effPadding - 1.0f)) / 2f
+                    val expandY = (baseRect.height() * (effPadding - 1.0f)) / 2f
+                    val rect = RectF(baseRect.left - expandX, baseRect.top - expandY, baseRect.right + expandX, baseRect.bottom + expandY)
+                    rect.contains(testX, testY)
+                } else {
+                    baseRect.contains(testX, testY)
+                }
+            }
+        }
     }
 
     // -------------------------------------------------------------------
@@ -828,7 +1094,26 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
                 val W = width.toFloat()
                 val H = height.toFloat()
 
-                // Check if user tapped the gear icon badge on any BUTTON element first
+                // Check if user tapped the gear icon badge on the STICK element
+                val stickGearTarget = elements.firstOrNull { it.type == ElementType.STICK }
+                if (stickGearTarget != null) {
+                    val stickCx = stickGearTarget.xPct * W
+                    val stickCy = stickGearTarget.yPct * H
+                    val stickR = H * 0.16f * stickGearTarget.scale
+                    val sBadgeR = (stickR * 0.22f).coerceIn(15f, 30f)
+                    val sBadgeX = stickCx + stickR * 0.72f
+                    val sBadgeY = stickCy + stickR * 0.72f
+                    val sTouchRadius = (sBadgeR * 1.5f).coerceAtLeast(32f)
+                    if (hypot(event.x - sBadgeX, event.y - sBadgeY) <= sTouchRadius) {
+                        selectedElement = stickGearTarget
+                        onElementSelected?.invoke(stickGearTarget)
+                        invalidate()
+                        onOpenStickSettingsRequested?.invoke(stickGearTarget)
+                        return true
+                    }
+                }
+
+                // Check if user tapped the gear icon badge on any BUTTON element
                 val gearTarget = elements.filter { it.type == ElementType.BUTTON }
                     .sortedByDescending { it.zOrder }
                     .firstOrNull { btnEl ->
@@ -900,6 +1185,10 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
             }
             MotionEvent.ACTION_CANCEL -> {
                 pointerZone.clear()
+                buttonPointerLastX.clear()
+                buttonPointerLastY.clear()
+                buttonTouchStart.clear()
+                buttonTouchCurrent.clear()
                 stopAllTurbo()
                 isAutoRunLocked = false
                 isStickInLockNotch = false
@@ -920,15 +1209,10 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
         if (el != null) {
             when (el.type) {
                 ElementType.STICK -> {
-                    if (isAutoRunLocked) {
+                    if (stickSprintMode && isAutoRunLocked) {
                         // Tapping stick cancels auto-run lock!
-                        isAutoRunLocked = false
-                        isStickInLockNotch = false
-                        setSprintActive(false)
-                        state = state.copy(stickX = 0f, stickY = 0f)
+                        resetSprint()
                         hapticHelper.click()
-                        emitState()
-                        invalidate()
                         return
                     }
                     pointerZone[id] = "stick"
@@ -951,6 +1235,13 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
                     val isHeavy = el.id in listOf("lt", "rt") || el.key in listOf("mouse_left", "mouse_right")
                     val zoneKey = getZoneKey(el)
                     pointerZone[id] = zoneKey
+                    buttonTouchStart[zoneKey] = Pair(x, y)
+                    buttonTouchCurrent[zoneKey] = Pair(x, y)
+
+                    if (el.swipeToAim) {
+                        buttonPointerLastX[id] = x
+                        buttonPointerLastY[id] = y
+                    }
 
                     if (isRecordingMacro) {
                         val keyName = el.key.ifEmpty { el.id }
@@ -1042,22 +1333,76 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
                 lastLookX = x
                 lastLookY = y
             }
+            else -> {
+                // Button Swipe-to-Aim & Visual Drag Tracking
+                val zone = pointerZone[id]
+                if (zone != null) {
+                    val el = elements.firstOrNull { getZoneKey(it) == zone }
+                    if (el != null && !el.swipeToAim && !isEditMode) {
+                        // For buttons with Swipe-to-Aim OFF (e.g. Reload, Jump, Crouch):
+                        // As soon as thumb swipes off the button's area, release click and transition to mouse look!
+                        val isInside = isPointInsideButton(el, x, y, paddingMultiplier = 1.15f)
+                        if (!isInside) {
+                            if (isRecordingMacro) {
+                                val keyName = el.key.ifEmpty { el.id }
+                                onMacroEventRecorded?.invoke(keyName, false, System.currentTimeMillis())
+                            }
+                            if (activeTurboRunnables.containsKey(zone)) {
+                                stopTurbo(zone)
+                            }
+                            if (!el.isToggle || !latchedButtons.contains(zone)) {
+                                setButtonState(zone, false)
+                            }
+                            buttonTouchStart.remove(zone)
+                            buttonTouchCurrent.remove(zone)
+                            buttonPointerLastX.remove(id)
+                            buttonPointerLastY.remove(id)
+
+                            // Seamlessly handover to mouse look
+                            pointerZone[id] = "look"
+                            lookPointerId = id
+                            lastLookX = x
+                            lastLookY = y
+                            emitState()
+                            invalidate()
+                            return
+                        }
+                    }
+
+                    buttonTouchCurrent[zone] = Pair(x, y)
+                }
+                val lastX = buttonPointerLastX[id]
+                val lastY = buttonPointerLastY[id]
+                if (lastX != null && lastY != null) {
+                    val dx = (x - lastX) * mouseSensitivity
+                    val dy = (y - lastY) * mouseSensitivity
+                    accumDx += dx
+                    accumDy += dy
+                    buttonPointerLastX[id] = x
+                    buttonPointerLastY[id] = y
+                }
+            }
         }
     }
 
     private fun handlePointerUp(id: Int) {
-        when (val zone = pointerZone[id]) {
+        val zone = pointerZone[id]
+        when (zone) {
             "stick" -> {
-                if (isStickInLockNotch) {
+                if (stickSprintMode && isStickInLockNotch) {
                     // Lock auto-run forward!
                     isAutoRunLocked = true
                     isStickInLockNotch = false
+                    visualStickX = 0f
+                    visualStickY = -1.0f
                     state = state.copy(stickX = 0f, stickY = -1.0f)
                     setSprintActive(true)
                     hapticHelper.heavyClick()
                 } else {
                     isAutoRunLocked = false
-                    setSprintActive(false)
+                    if (autoShiftActive) setSprintActive(false)
+                    visualStickX = 0f
+                    visualStickY = 0f
                     state = state.copy(stickX = 0f, stickY = 0f)
                     stickAtEdge = false
                 }
@@ -1115,6 +1460,12 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
                 }
             }
         }
+        if (zone != null) {
+            buttonTouchStart.remove(zone)
+            buttonTouchCurrent.remove(zone)
+        }
+        buttonPointerLastX.remove(id)
+        buttonPointerLastY.remove(id)
         pointerZone.remove(id)
     }
 
@@ -1139,16 +1490,20 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
         val notchY = cy - r * 1.55f
         val notchR = r * 0.38f
 
-        // Check if finger dragged into Auto-Run Lock Notch
-        val distToNotch = hypot((x - notchX).toDouble(), (y - notchY).toDouble()).toFloat()
-        if (distToNotch <= notchR * 1.6f) {
-            if (!isStickInLockNotch) {
-                isStickInLockNotch = true
-                hapticHelper.edgeBump()
+        // Check if finger dragged into Auto-Run Lock Notch (Sprint Mode only)
+        if (stickSprintMode) {
+            val distToNotch = hypot((x - notchX).toDouble(), (y - notchY).toDouble()).toFloat()
+            if (distToNotch <= notchR * 1.6f) {
+                if (!isStickInLockNotch) {
+                    isStickInLockNotch = true
+                    hapticHelper.edgeBump()
+                }
+                visualStickX = 0f
+                visualStickY = -1.0f
+                state = state.copy(stickX = 0f, stickY = -1.0f)
+                setSprintActive(true)
+                return
             }
-            state = state.copy(stickX = 0f, stickY = -1.0f)
-            setSprintActive(true)
-            return
         }
         isStickInLockNotch = false
 
@@ -1159,19 +1514,32 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
         val targetStickX = (Math.cos(angle) * mag).toFloat()
         val targetStickY = (Math.sin(angle) * mag).toFloat()
 
+        visualStickX = targetStickX
+        visualStickY = targetStickY
+
+        // In Normal Mode (Walk Mode): strictly 8-direction WASD with NO shift involved.
+        // Clamp sent stickY to -0.75f so PC server's hardcoded sprint threshold (-0.82f) is never crossed.
+        val sentStickY = if (!stickSprintMode && targetStickY < -0.75f) -0.75f else targetStickY
+
         state = state.copy(
             stickX = targetStickX,
-            stickY = targetStickY
+            stickY = sentStickY
         )
 
-        // Dynamic auto-sprint on forward tilt (> 80% mag and stickY < -0.55f)
-        if (mag >= 0.80f && targetStickY <= -0.55f) {
-            if (!autoShiftActive) {
-                hapticHelper.tick()
-                setSprintActive(true)
+        // Dynamic auto-sprint on forward tilt (> 80% mag and stickY < -0.55f) — Sprint Mode only
+        if (stickSprintMode) {
+            if (mag >= 0.80f && targetStickY <= -0.55f) {
+                if (!autoShiftActive) {
+                    hapticHelper.tick()
+                    setSprintActive(true)
+                }
+            } else if (mag < 0.70f || targetStickY > -0.40f) {
+                if (autoShiftActive && !isAutoRunLocked) {
+                    setSprintActive(false)
+                }
             }
-        } else if (mag < 0.70f || targetStickY > -0.40f) {
-            if (autoShiftActive && !isAutoRunLocked) {
+        } else {
+            if (autoShiftActive) {
                 setSprintActive(false)
             }
         }
@@ -1267,6 +1635,9 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
                 it.label = newLabel
             } else if (it.isCustom) {
                 it.label = "C${it.customSlot + 1} (${formatKeyDisplay(newKey)})"
+            }
+            if (newKey in listOf("mouse_left", "mouse_right")) {
+                it.swipeToAim = true
             }
             invalidate()
             onLayoutChanged?.invoke()
@@ -1375,6 +1746,48 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
                 if (customMacro != null) {
                     it.customMacro = customMacro
                 }
+                invalidate()
+                onLayoutChanged?.invoke()
+            }
+        }
+    }
+
+    fun updateSelectedSwipeToAim(enabled: Boolean) {
+        selectedElement?.let {
+            if (it.type == ElementType.BUTTON) {
+                it.swipeToAim = enabled
+                invalidate()
+                onLayoutChanged?.invoke()
+            }
+        }
+    }
+
+    fun updateSelectedTouchPadding(newPadding: Float) {
+        selectedElement?.let {
+            if (it.type == ElementType.BUTTON) {
+                it.touchPadding = newPadding.coerceIn(1.0f, 2.5f)
+                invalidate()
+                onLayoutChanged?.invoke()
+            }
+        }
+    }
+
+    fun updateSelectedGhostShadow(enabled: Boolean) {
+        selectedElement?.let {
+            if (it.type == ElementType.BUTTON) {
+                it.showGhostShadow = enabled
+                it.userExplicitGhostShadow = true
+                invalidate()
+                onLayoutChanged?.invoke()
+            }
+        }
+    }
+
+    fun updateSelectedMaxDragDistance(distance: Float) {
+        selectedElement?.let {
+            if (it.type == ElementType.BUTTON) {
+                it.maxDragDistance = distance.coerceIn(0.0f, 6.0f)
+                it.userExplicitDragDist = true
                 invalidate()
                 onLayoutChanged?.invoke()
             }
