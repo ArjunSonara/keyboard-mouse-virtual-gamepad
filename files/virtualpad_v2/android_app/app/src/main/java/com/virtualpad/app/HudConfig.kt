@@ -258,7 +258,9 @@ data class HudElement(
     var showGhostShadow: Boolean = false,
     var userExplicitGhostShadow: Boolean = false,
     var maxDragDistance: Float = 0.8f,
-    var userExplicitDragDist: Boolean = false
+    var userExplicitDragDist: Boolean = false,
+    var isInstantTap: Boolean = false,
+    var instantTapDurationMs: Int = 15
 ) {
     fun toJson(): JSONObject {
         val obj = JSONObject()
@@ -292,6 +294,8 @@ data class HudElement(
             obj.put("userExplicitGhostShadow", userExplicitGhostShadow)
             obj.put("maxDragDistance", maxDragDistance.toDouble())
             obj.put("userExplicitDragDist", userExplicitDragDist)
+            obj.put("isInstantTap", isInstantTap)
+            obj.put("instantTapDurationMs", instantTapDurationMs)
         }
         return obj
     }
@@ -323,6 +327,8 @@ data class HudElement(
                 0.8f
             }
             val userExplicitDragDist = hasExplicitDrag
+            val isInstantTap = obj.optBoolean("isInstantTap", false)
+            val instantTapDurationMs = obj.optInt("instantTapDurationMs", 15)
             return HudElement(
                 id = idStr,
                 label = obj.optString("label", ""),
@@ -350,7 +356,9 @@ data class HudElement(
                 showGhostShadow = showGhostShadow,
                 userExplicitGhostShadow = userExplicitGhostShadow,
                 maxDragDistance = maxDragDistance,
-                userExplicitDragDist = userExplicitDragDist
+                userExplicitDragDist = userExplicitDragDist,
+                isInstantTap = isInstantTap,
+                instantTapDurationMs = instantTapDurationMs
             )
         }
     }

@@ -992,7 +992,14 @@ class MainActivity : Activity(), SensorEventListener {
             background = createCardDrawable(Color.parseColor("#3D3200"), 12f, Color.parseColor("#FFD600"), 1)
             setPadding(16, 6, 16, 6)
             visibility = View.GONE
-            setOnClickListener { cycleSelectedTurboCps() }
+            setOnClickListener {
+                val selected = controllerView.selectedElement
+                if (selected?.isInstantTap == true) {
+                    cycleSelectedInstantTapDuration()
+                } else {
+                    cycleSelectedTurboCps()
+                }
+            }
         }
         buttonControlsRow.addView(turboCpsButton, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { rightMargin = 14 })
 
@@ -1158,13 +1165,21 @@ class MainActivity : Activity(), SensorEventListener {
                     modeButton.alpha = 1.0f
                     modeButton.text = when {
                         el.isTurbo -> "Mode: Turbo ⚡"
+                        el.isInstantTap -> "Mode: Instant ⏱️"
                         el.isToggle -> "Mode: Toggle 🔒"
-                        else -> "Mode: Hold ⏱️"
+                        else -> "Mode: Hold"
                     }
 
                     if (el.isTurbo) {
                         turboCpsButton.visibility = View.VISIBLE
                         turboCpsButton.text = "⚡ ${el.turboCps} CPS"
+                        turboCpsButton.setTextColor(Color.parseColor("#FFD600"))
+                        turboCpsButton.background = createCardDrawable(Color.parseColor("#3D3200"), 12f, Color.parseColor("#FFD600"), 1)
+                    } else if (el.isInstantTap) {
+                        turboCpsButton.visibility = View.VISIBLE
+                        turboCpsButton.text = "⏱️ ${el.instantTapDurationMs}ms"
+                        turboCpsButton.setTextColor(Color.parseColor("#FF9100"))
+                        turboCpsButton.background = createCardDrawable(Color.parseColor("#3D2200"), 12f, Color.parseColor("#FF9100"), 1)
                     } else {
                         turboCpsButton.visibility = View.GONE
                     }
@@ -1222,20 +1237,25 @@ class MainActivity : Activity(), SensorEventListener {
         if (selected.type != ElementType.BUTTON) return
 
         when {
-            !selected.isToggle && !selected.isTurbo -> {
+            !selected.isToggle && !selected.isTurbo && !selected.isInstantTap -> {
                 // Hold -> Toggle
-                controllerView.updateSelectedButtonMode(isToggle = true, isTurbo = false)
+                controllerView.updateSelectedButtonMode(isToggle = true, isTurbo = false, isInstantTap = false)
                 Toast.makeText(this, "Toggle Mode 🔒: Tap to lock ON, tap again to release", Toast.LENGTH_SHORT).show()
             }
             selected.isToggle -> {
                 // Toggle -> Turbo
-                controllerView.updateSelectedButtonMode(isToggle = false, isTurbo = true)
+                controllerView.updateSelectedButtonMode(isToggle = false, isTurbo = true, isInstantTap = false)
                 Toast.makeText(this, "Turbo Mode ⚡: Hold for rapid-fire auto-click (${selected.turboCps} CPS)", Toast.LENGTH_SHORT).show()
             }
+            selected.isTurbo -> {
+                // Turbo -> Instant Tap
+                controllerView.updateSelectedButtonMode(isToggle = false, isTurbo = false, isInstantTap = true)
+                Toast.makeText(this, "Instant Tap ⏱️: Auto-release after ${selected.instantTapDurationMs}ms (One-Shot)", Toast.LENGTH_SHORT).show()
+            }
             else -> {
-                // Turbo -> Hold
-                controllerView.updateSelectedButtonMode(isToggle = false, isTurbo = false)
-                Toast.makeText(this, "Hold Mode ⏱️: Standard press & hold", Toast.LENGTH_SHORT).show()
+                // Instant Tap -> Hold
+                controllerView.updateSelectedButtonMode(isToggle = false, isTurbo = false, isInstantTap = false)
+                Toast.makeText(this, "Hold Mode: Standard press & hold", Toast.LENGTH_SHORT).show()
             }
         }
         updateInspector(selected)
@@ -1255,6 +1275,22 @@ class MainActivity : Activity(), SensorEventListener {
         controllerView.updateSelectedButtonMode(isToggle = false, isTurbo = true, turboCps = nextCps)
         updateInspector(selected)
         Toast.makeText(this, "Turbo Speed: $nextCps Clicks Per Second", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun cycleSelectedInstantTapDuration() {
+        val selected = controllerView.selectedElement ?: return
+        if (selected.type != ElementType.BUTTON || !selected.isInstantTap) return
+
+        val durations = listOf(5, 10, 15, 25, 50, 100, 200)
+        val currentIndex = durations.indexOf(selected.instantTapDurationMs)
+        val nextDuration = if (currentIndex != -1 && currentIndex < durations.size - 1) {
+            durations[currentIndex + 1]
+        } else {
+            durations[0]
+        }
+        controllerView.updateSelectedButtonMode(isToggle = false, isTurbo = false, isInstantTap = true, instantTapDurationMs = nextDuration)
+        updateInspector(selected)
+        Toast.makeText(this, "Instant Tap Duration: ${nextDuration}ms", Toast.LENGTH_SHORT).show()
     }
 
     private fun buildRecordingBanner(root: FrameLayout) {
@@ -2623,9 +2659,10 @@ class MainActivity : Activity(), SensorEventListener {
 
         fun updateStatsCard() {
             statsModeText.text = "• Mode: " + when {
-                selected.isTurbo -> "Turbo Rapid-Fire (${selected.turboCps} CPS)"
+                selected.isTurbo -> "Turbo Rapid-Fire (${selected.turboCps} CPS) ⚡"
+                selected.isInstantTap -> "Instant Tap (${selected.instantTapDurationMs} ms) ⏱️"
                 selected.isToggle -> "Toggle Latch 🔒"
-                else -> "Normal Hold ⏱️"
+                else -> "Normal Hold"
             }
             statsShapeText.text = "• Shape: " + when (selected.shape) {
                 ButtonShape.CIRCLE -> "Circle (360°)"
@@ -2730,7 +2767,7 @@ class MainActivity : Activity(), SensorEventListener {
 
         val modeRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         val modeBtns = mutableListOf<Button>()
-        val modes = listOf("HOLD" to "Hold ⏱️", "TOGGLE" to "Toggle 🔒", "TURBO" to "Turbo ⚡")
+        val modes = listOf("HOLD" to "Hold", "TOGGLE" to "Toggle 🔒", "TURBO" to "Turbo ⚡", "INSTANT_TAP" to "Instant ⏱️")
 
         val turboContainer = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -2738,17 +2775,31 @@ class MainActivity : Activity(), SensorEventListener {
             visibility = if (selected.isTurbo) View.VISIBLE else View.GONE
         }
 
+        val instantTapContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, 6, 0, 6)
+            visibility = if (selected.isInstantTap) View.VISIBLE else View.GONE
+        }
+
         fun updateModeButtons() {
             val currentMode = when {
                 selected.isTurbo -> "TURBO"
+                selected.isInstantTap -> "INSTANT_TAP"
                 selected.isToggle -> "TOGGLE"
                 else -> "HOLD"
             }
             modes.forEachIndexed { idx, (modeCode, _) ->
                 val btn = modeBtns[idx]
                 if (currentMode == modeCode) {
-                    val color = if (modeCode == "TURBO") "#FFD600" else "#1F6FEB"
-                    val textColor = if (modeCode == "TURBO") Color.BLACK else Color.WHITE
+                    val color = when (modeCode) {
+                        "TURBO" -> "#FFD600"
+                        "INSTANT_TAP" -> "#FF9100"
+                        else -> "#1F6FEB"
+                    }
+                    val textColor = when (modeCode) {
+                        "TURBO", "INSTANT_TAP" -> Color.BLACK
+                        else -> Color.WHITE
+                    }
                     btn.background = createCardDrawable(Color.parseColor(color), 10f)
                     btn.setTextColor(textColor)
                 } else {
@@ -2757,18 +2808,20 @@ class MainActivity : Activity(), SensorEventListener {
                 }
             }
             turboContainer.visibility = if (selected.isTurbo) View.VISIBLE else View.GONE
+            instantTapContainer.visibility = if (selected.isInstantTap) View.VISIBLE else View.GONE
         }
 
         modes.forEach { (modeCode, modeTitle) ->
             val btn = Button(this).apply {
                 text = modeTitle
-                textSize = 11f
-                setPadding(12, 6, 12, 6)
+                textSize = 10f
+                setPadding(8, 6, 8, 6)
                 setOnClickListener {
                     when (modeCode) {
-                        "HOLD" -> controllerView.updateSelectedButtonMode(isToggle = false, isTurbo = false)
-                        "TOGGLE" -> controllerView.updateSelectedButtonMode(isToggle = true, isTurbo = false)
-                        "TURBO" -> controllerView.updateSelectedButtonMode(isToggle = false, isTurbo = true)
+                        "HOLD" -> controllerView.updateSelectedButtonMode(isToggle = false, isTurbo = false, isInstantTap = false)
+                        "TOGGLE" -> controllerView.updateSelectedButtonMode(isToggle = true, isTurbo = false, isInstantTap = false)
+                        "TURBO" -> controllerView.updateSelectedButtonMode(isToggle = false, isTurbo = true, isInstantTap = false)
+                        "INSTANT_TAP" -> controllerView.updateSelectedButtonMode(isToggle = false, isTurbo = false, isInstantTap = true)
                     }
                     updateModeButtons()
                     updateStatsCard()
@@ -2776,7 +2829,7 @@ class MainActivity : Activity(), SensorEventListener {
                 }
             }
             modeBtns.add(btn)
-            modeRow.addView(btn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = 6 })
+            modeRow.addView(btn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = 4 })
         }
         updateModeButtons()
         rightCol.addView(modeRow)
@@ -2798,7 +2851,7 @@ class MainActivity : Activity(), SensorEventListener {
                     val rate = prog + 4
                     cpsLabel.text = "⚡ TURBO RATE: $rate CPS (Clicks / Sec)"
                     if (fromUser) {
-                        controllerView.updateSelectedButtonMode(isToggle = false, isTurbo = true, turboCps = rate)
+                        controllerView.updateSelectedButtonMode(isToggle = false, isTurbo = true, turboCps = rate, isInstantTap = false)
                         updateStatsCard()
                         updateInspector(selected)
                     }
@@ -2825,7 +2878,7 @@ class MainActivity : Activity(), SensorEventListener {
                 setOnClickListener {
                     cpsSeekBar.progress = cps - 4
                     cpsLabel.text = "⚡ TURBO RATE: $cps CPS (Clicks / Sec)"
-                    controllerView.updateSelectedButtonMode(isToggle = false, isTurbo = true, turboCps = cps)
+                    controllerView.updateSelectedButtonMode(isToggle = false, isTurbo = true, turboCps = cps, isInstantTap = false)
                     updateStatsCard()
                     updateInspector(selected)
                 }
@@ -2835,6 +2888,69 @@ class MainActivity : Activity(), SensorEventListener {
         cpsChipScroll.addView(cpsChipRow)
         turboContainer.addView(cpsChipScroll)
         rightCol.addView(turboContainer)
+
+        // Instant Tap Duration Controls (Slider + Preset chips: 5, 10, 15, 25, 50, 100, 200 ms)
+        val instantLabel = TextView(this).apply {
+            text = "⏱️ INSTANT TAP DURATION: ${selected.instantTapDurationMs} ms"
+            textSize = 10f
+            setTextColor(Color.parseColor("#FF9100"))
+            setTypeface(null, android.graphics.Typeface.BOLD)
+            setPadding(0, 4, 0, 2)
+        }
+        val instantSub = TextView(this).apply {
+            text = "Auto-releases key after set time (One-Shot), even if finger is held down"
+            textSize = 9f
+            setTextColor(Color.parseColor("#8B949E"))
+            setPadding(0, 0, 0, 4)
+        }
+        instantTapContainer.addView(instantLabel)
+        instantTapContainer.addView(instantSub)
+
+        val instantSeekBar = SeekBar(this).apply {
+            max = 195 // 5 + 195 = 200
+            progress = (selected.instantTapDurationMs - 5).coerceIn(0, 195)
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar?, prog: Int, fromUser: Boolean) {
+                    val ms = prog + 5
+                    instantLabel.text = "⏱️ INSTANT TAP DURATION: ${ms} ms"
+                    if (fromUser) {
+                        controllerView.updateSelectedButtonMode(isToggle = false, isTurbo = false, isInstantTap = true, instantTapDurationMs = ms)
+                        updateStatsCard()
+                        updateInspector(selected)
+                    }
+                }
+                override fun onStartTrackingTouch(sb: SeekBar?) {}
+                override fun onStopTrackingTouch(sb: SeekBar?) {}
+            })
+        }
+        instantTapContainer.addView(instantSeekBar, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+
+        val instantChipScroll = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            setPadding(0, 2, 0, 4)
+        }
+        val instantChipRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val instantPresets = listOf(5, 10, 15, 25, 50, 100, 200)
+        for (ms in instantPresets) {
+            val chip = Button(this).apply {
+                text = if (ms == 15) "15 ms (Def)" else "$ms ms"
+                textSize = 9f
+                setTextColor(Color.parseColor("#FF9100"))
+                background = createCardDrawable(Color.parseColor("#3D2200"), 6f, Color.parseColor("#FF9100"), 1)
+                setPadding(10, 3, 10, 3)
+                setOnClickListener {
+                    instantSeekBar.progress = (ms - 5).coerceIn(0, 195)
+                    instantLabel.text = "⏱️ INSTANT TAP DURATION: ${ms} ms"
+                    controllerView.updateSelectedButtonMode(isToggle = false, isTurbo = false, isInstantTap = true, instantTapDurationMs = ms)
+                    updateStatsCard()
+                    updateInspector(selected)
+                }
+            }
+            instantChipRow.addView(chip, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { rightMargin = 6 })
+        }
+        instantChipScroll.addView(instantChipRow)
+        instantTapContainer.addView(instantChipScroll)
+        rightCol.addView(instantTapContainer)
 
         // --- SECTION: Swipe to Aim (Camera Rotation while holding) ---
         val swipeAimHeader = TextView(this).apply {

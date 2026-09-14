@@ -179,6 +179,7 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
                 buttonTouchCurrent.clear()
                 latchedButtons.clear()
                 stopAllTurbo()
+                stopAllInstantTap()
                 isAutoRunLocked = false
                 isStickInLockNotch = false
                 autoShiftActive = false
@@ -222,6 +223,11 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
     private val turboHandler = Handler(Looper.getMainLooper())
     private val activeTurboRunnables = HashMap<String, Runnable>()
     private val turboPulseState = HashMap<String, Boolean>()
+
+    // Instant Tap / Quick Pulse (One-Shot) State
+    private val instantTapHandler = Handler(Looper.getMainLooper())
+    private val activeInstantTapRunnables = HashMap<String, Runnable>()
+    private val instantTapPulseState = HashMap<String, Boolean>()
 
     private var visualStickX = 0f
     private var visualStickY = 0f
@@ -680,6 +686,12 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
             badgePaint.textSize = min(W, H) * 0.022f * el.scale
             badgePaint.color = if (isPulsing) Color.parseColor("#FFD600") else Color.parseColor("#B3FFD600")
             canvas.drawText("⚡", cx + r * 0.55f, cy - r * 0.40f, badgePaint)
+        } else if (el.isInstantTap) {
+            val zoneKey = getZoneKey(el)
+            val isPulsing = instantTapPulseState[zoneKey] == true
+            badgePaint.textSize = min(W, H) * 0.022f * el.scale
+            badgePaint.color = if (isPulsing) Color.parseColor("#FF9100") else Color.parseColor("#B3FF9100")
+            canvas.drawText("⏱️", cx + r * 0.55f, cy - r * 0.40f, badgePaint)
         }
     }
 
@@ -814,6 +826,9 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
         if (el.isTurbo) {
             return turboPulseState[zoneKey] == true
         }
+        if (el.isInstantTap) {
+            return instantTapPulseState[zoneKey] == true
+        }
         if (el.isToggle && latchedButtons.contains(zoneKey)) {
             return true
         }
@@ -861,6 +876,40 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
         activeTurboRunnables.values.forEach { turboHandler.removeCallbacks(it) }
         activeTurboRunnables.clear()
         turboPulseState.clear()
+    }
+
+    private fun startInstantTap(zoneKey: String, durationMs: Int) {
+        stopInstantTap(zoneKey)
+        val safeDuration = durationMs.coerceIn(5, 500).toLong()
+
+        instantTapPulseState[zoneKey] = true
+        setButtonState(zoneKey, true)
+        emitState()
+        invalidate()
+
+        val runnable = Runnable {
+            instantTapPulseState[zoneKey] = false
+            setButtonState(zoneKey, false)
+            emitState()
+            invalidate()
+            activeInstantTapRunnables.remove(zoneKey)
+        }
+        activeInstantTapRunnables[zoneKey] = runnable
+        instantTapHandler.postDelayed(runnable, safeDuration)
+    }
+
+    private fun stopInstantTap(zoneKey: String) {
+        activeInstantTapRunnables.remove(zoneKey)?.let { instantTapHandler.removeCallbacks(it) }
+        instantTapPulseState[zoneKey] = false
+        setButtonState(zoneKey, false)
+        emitState()
+        invalidate()
+    }
+
+    fun stopAllInstantTap() {
+        activeInstantTapRunnables.values.forEach { instantTapHandler.removeCallbacks(it) }
+        activeInstantTapRunnables.clear()
+        instantTapPulseState.clear()
     }
 
     private fun getButtonRadius(el: HudElement, H: Float): Float = H * 0.075f * el.scale
@@ -1206,6 +1255,7 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
                 buttonTouchStart.clear()
                 buttonTouchCurrent.clear()
                 stopAllTurbo()
+                stopAllInstantTap()
                 isAutoRunLocked = false
                 isStickInLockNotch = false
                 autoShiftActive = false
@@ -1293,6 +1343,9 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
                     } else if (el.isTurbo) {
                         if (isHeavy) hapticHelper.heavyClick() else hapticHelper.click()
                         startTurbo(zoneKey, el.turboCps)
+                    } else if (el.isInstantTap) {
+                        if (isHeavy) hapticHelper.heavyClick() else hapticHelper.click()
+                        startInstantTap(zoneKey, el.instantTapDurationMs)
                     } else {
                         if (isHeavy) hapticHelper.heavyClick() else hapticHelper.click()
                         setButtonState(zoneKey, true)
@@ -1386,6 +1439,9 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
                             }
                             if (activeTurboRunnables.containsKey(zone)) {
                                 stopTurbo(zone)
+                            }
+                            if (activeInstantTapRunnables.containsKey(zone)) {
+                                stopInstantTap(zone)
                             }
                             if (!el.isToggle || !latchedButtons.contains(zone)) {
                                 setButtonState(zone, false)
@@ -1507,6 +1563,8 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
                         invalidate()
                     } else if (activeTurboRunnables.containsKey(zone)) {
                         stopTurbo(zone)
+                    } else if (activeInstantTapRunnables.containsKey(zone)) {
+                        stopInstantTap(zone)
                     } else if (latchedButtons.contains(zone)) {
                         // Latched in Toggle mode - stay ON!
                         setButtonState(zone, true)
@@ -1781,13 +1839,23 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
         return true
     }
 
-    fun updateSelectedButtonMode(isToggle: Boolean, isTurbo: Boolean, turboCps: Int? = null) {
+    fun updateSelectedButtonMode(
+        isToggle: Boolean,
+        isTurbo: Boolean,
+        turboCps: Int? = null,
+        isInstantTap: Boolean = false,
+        instantTapDurationMs: Int? = null
+    ) {
         selectedElement?.let {
             if (it.type == ElementType.BUTTON) {
                 it.isToggle = isToggle
                 it.isTurbo = isTurbo
                 if (turboCps != null) {
                     it.turboCps = turboCps
+                }
+                it.isInstantTap = isInstantTap
+                if (instantTapDurationMs != null) {
+                    it.instantTapDurationMs = instantTapDurationMs
                 }
                 invalidate()
                 onLayoutChanged?.invoke()
@@ -1974,6 +2042,7 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
     fun resetToDefault(profileName: String = "Default") {
         latchedButtons.clear()
         stopAllTurbo()
+        stopAllInstantTap()
         isAutoRunLocked = false
         isStickInLockNotch = false
         autoShiftActive = false
@@ -1988,6 +2057,7 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
     fun loadProfile(profileName: String) {
         latchedButtons.clear()
         stopAllTurbo()
+        stopAllInstantTap()
         isAutoRunLocked = false
         isStickInLockNotch = false
         autoShiftActive = false
@@ -2002,5 +2072,6 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
     override fun onDetachedFromWindow() {
         super.onDetachedFromWindow()
         stopAllTurbo()
+        stopAllInstantTap()
     }
 }
