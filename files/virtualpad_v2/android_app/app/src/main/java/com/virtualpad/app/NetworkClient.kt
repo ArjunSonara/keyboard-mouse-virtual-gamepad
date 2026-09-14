@@ -137,10 +137,12 @@ class NetworkClient {
                 try {
                     // heartbeat: resend last known buttons/stick, never replay mouse deltas
                     sendRaw(lastSent.copy(mouseDx = 0, mouseDy = 0).toBytes())
+                    Thread.sleep(30)
+                } catch (_: InterruptedException) {
+                    break
                 } catch (_: Exception) {
                     // ignore transient send errors, keep looping
                 }
-                Thread.sleep(30)
             }
         }
         heartbeatThread?.isDaemon = true
@@ -191,7 +193,13 @@ class NetworkClient {
         sendExecutor.execute {
             try {
                 if (mode == TransportMode.USB) {
-                    sendRaw(packet)
+                    for (attempt in 0 until 10) {
+                        if (tcpOut != null) {
+                            sendRaw(packet)
+                            break
+                        }
+                        Thread.sleep(100)
+                    }
                 } else {
                     for (i in 0 until 3) {
                         sendRaw(packet)

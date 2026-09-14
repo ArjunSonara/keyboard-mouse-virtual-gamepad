@@ -251,7 +251,8 @@ data class HudElement(
     var isTurbo: Boolean = false,
     var turboCps: Int = 12,
     var macroType: String = "",
-    var customMacro: String = ""
+    var customMacro: String = "",
+    var rotation: Float = 0f
 ) {
     fun toJson(): JSONObject {
         val obj = JSONObject()
@@ -266,6 +267,7 @@ data class HudElement(
         obj.put("customSlot", customSlot)
         obj.put("zOrder", zOrder)
         obj.put("shape", shape.name)
+        obj.put("rotation", rotation.toDouble())
         if (type == ElementType.DPAD) {
             obj.put("dpadUpKey", dpadUpKey)
             obj.put("dpadDownKey", dpadDownKey)
@@ -308,7 +310,8 @@ data class HudElement(
                 isTurbo = obj.optBoolean("isTurbo", false),
                 turboCps = obj.optInt("turboCps", 12),
                 macroType = obj.optString("macroType", ""),
-                customMacro = obj.optString("customMacro", "")
+                customMacro = obj.optString("customMacro", ""),
+                rotation = obj.optDouble("rotation", 0.0).toFloat()
             )
         }
     }
@@ -460,7 +463,27 @@ object HudConfig {
             for (i in 0 until array.length()) {
                 list.add(HudElement.fromJson(array.getJSONObject(i)))
             }
-            if (list.isEmpty()) getBaseElementsForProfile(profile).toMutableList() else list
+            if (list.isEmpty()) {
+                getBaseElementsForProfile(profile).toMutableList()
+            } else {
+                if (list.none { it.type == ElementType.SCROLL_WHEEL }) {
+                    val maxZ = (list.maxOfOrNull { it.zOrder } ?: 20) + 1
+                    list.add(
+                        HudElement(
+                            id = "scroll_wheel",
+                            label = "WHEEL",
+                            key = "mouse_wheel",
+                            type = ElementType.SCROLL_WHEEL,
+                            xPct = 0.97f,
+                            yPct = 0.48f,
+                            scale = 1.0f,
+                            zOrder = maxZ,
+                            shape = ButtonShape.ROUNDED_RECT
+                        )
+                    )
+                }
+                list
+            }
         } catch (_: Exception) {
             getBaseElementsForProfile(profile).toMutableList()
         }

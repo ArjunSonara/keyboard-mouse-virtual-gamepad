@@ -221,9 +221,15 @@ def _actually_set_key(key: str, should_hold: bool):
                 pass
             # 2. Interception mouse hold
             try:
-                ctx = interception.hold_mouse(mouse_btn)
-                ctx.__enter__()
-                _held_ctx[key] = ctx
+                if _interception_ctx and _interception_ctx.mouse:
+                    btn_state = interception.inputs._get_button_states(mouse_btn, down=True)
+                    stroke = interception.MouseStroke(
+                        interception.MouseFlag.MOUSE_MOVE_RELATIVE,
+                        btn_state,
+                        0, 0, 0
+                    )
+                    _interception_ctx.send(_interception_ctx.mouse, stroke)
+                _held_ctx[key] = True
             except Exception:
                 _held_ctx[key] = True
         elif not should_hold and is_held:
@@ -231,12 +237,18 @@ def _actually_set_key(key: str, should_hold: bool):
                 ctypes.windll.user32.mouse_event(up_flag, 0, 0, 0, 0)
             except Exception:
                 pass
-            ctx = _held_ctx.pop(key, None)
-            if ctx and ctx is not True:
-                try:
-                    ctx.__exit__(None, None, None)
-                except Exception:
-                    pass
+            try:
+                if _interception_ctx and _interception_ctx.mouse:
+                    btn_state = interception.inputs._get_button_states(mouse_btn, down=False)
+                    stroke = interception.MouseStroke(
+                        interception.MouseFlag.MOUSE_MOVE_RELATIVE,
+                        btn_state,
+                        0, 0, 0
+                    )
+                    _interception_ctx.send(_interception_ctx.mouse, stroke)
+            except Exception:
+                pass
+            _held_ctx.pop(key, None)
     else:
         if should_hold and not is_held:
             try:
@@ -339,6 +351,19 @@ def handle_wheel_packet(data: bytes):
             ctypes.windll.user32.mouse_event(0x0800, 0, 0, int(wheel_delta), 0)
         except Exception:
             pass
+        if _interception_ctx and _interception_ctx.mouse:
+            try:
+                button_data = 120 if wheel_delta > 0 else 65416
+                stroke = interception.MouseStroke(
+                    interception.MouseFlag.MOUSE_MOVE_RELATIVE,
+                    interception.MouseButtonFlag.MOUSE_WHEEL,
+                    button_data,
+                    0,
+                    0
+                )
+                _interception_ctx.send(_interception_ctx.mouse, stroke)
+            except Exception:
+                pass
 
 
 def handle_macro_key_packet(data: bytes):

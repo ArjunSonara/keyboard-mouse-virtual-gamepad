@@ -6,6 +6,7 @@ import android.graphics.Color
 import android.graphics.DashPathEffect
 import android.graphics.Paint
 import android.graphics.RectF
+import android.graphics.Typeface
 import android.os.Handler
 import android.os.Looper
 import android.util.AttributeSet
@@ -120,6 +121,22 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
         strokeWidth = 6f
         isAntiAlias = true
     }
+    private val gearBadgeBgPaint = Paint().apply {
+        color = Color.parseColor("#E6161B22")
+        style = Paint.Style.FILL
+        isAntiAlias = true
+    }
+    private val gearBadgeBorderPaint = Paint().apply {
+        color = Color.parseColor("#58A6FF")
+        style = Paint.Style.STROKE
+        strokeWidth = 2.5f
+        isAntiAlias = true
+    }
+    private val gearBadgeIconPaint = Paint().apply {
+        color = Color.WHITE
+        textAlign = Paint.Align.CENTER
+        isAntiAlias = true
+    }
 
     // --- State & Layout ---
     val elements = mutableListOf<HudElement>()
@@ -184,7 +201,11 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
 
     // Scroll Wheel
     var onWheelScroll: ((Int) -> Unit)? = null
+    var onMiddleClick: ((Boolean) -> Unit)? = null
     private var lastWheelY = 0f
+    private var wheelDownY = 0f
+    private var wheelDownTime = 0L
+    private var wheelScrolledSteps = 0
     private var wheelAccumDy = 0f
 
     // Macros
@@ -193,11 +214,14 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
     var onMacroKeyRequested: ((key: String, pressed: Boolean) -> Unit)? = null
     var isRecordingMacro: Boolean = false
     var onMacroEventRecorded: ((key: String, isDown: Boolean, timestampMs: Long) -> Unit)? = null
+    var onOpenKeySettingsRequested: ((HudElement) -> Unit)? = null
 
     val hapticHelper = HapticHelper(context, this)
 
     init {
         isHapticFeedbackEnabled = true
+        hudOpacity = HudConfig.getHudOpacity(context)
+        elements.addAll(HudConfig.loadLayout(context))
     }
 
     private var lastDpadQuadrant: Int = -1
@@ -221,6 +245,7 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
             elements.addAll(HudConfig.loadLayout(context))
         }
         layoutReady = true
+        onLayoutChanged?.invoke()
         invalidate()
     }
 
@@ -366,6 +391,12 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
     private fun drawButtonElement(canvas: Canvas, el: HudElement, W: Float, H: Float) {
         val cx = el.xPct * W
         val cy = el.yPct * H
+        val hasRotation = el.rotation != 0f
+        if (hasRotation) {
+            canvas.save()
+            canvas.rotate(el.rotation, cx, cy)
+        }
+
         val active = isButtonActive(el)
         val zoneKey = getZoneKey(el)
         val isLatched = el.isToggle && latchedButtons.contains(zoneKey)
@@ -419,6 +450,22 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
             }
         }
         drawButtonLabels(canvas, el, cx, cy, W, H)
+
+        if (hasRotation) {
+            canvas.restore()
+        }
+
+        // In Edit Mode: Draw mini gear ⚙ icon badge at top-right corner
+        if (isEditMode) {
+            val (badgeX, badgeY) = getGearBadgeCenter(el, cx, cy, W, H)
+            val badgeR = getGearBadgeRadius(el, H)
+            canvas.drawCircle(badgeX, badgeY, badgeR, gearBadgeBgPaint)
+            canvas.drawCircle(badgeX, badgeY, badgeR, gearBadgeBorderPaint)
+            gearBadgeIconPaint.textSize = badgeR * 1.25f
+            val fm = gearBadgeIconPaint.fontMetrics
+            val baseline = badgeY - (fm.ascent + fm.descent) / 2f
+            canvas.drawText("⚙", badgeX, baseline, gearBadgeIconPaint)
+        }
     }
 
     private fun drawButtonLabels(canvas: Canvas, el: HudElement, cx: Float, cy: Float, W: Float, H: Float) {
@@ -499,6 +546,16 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
         }
         canvas.drawText("▲", cx, rect.top + 26f * el.scale, arrowPaint)
         canvas.drawText("▼", cx, rect.bottom - 12f * el.scale, arrowPaint)
+
+        // Center MMB label badge
+        val mmbPaint = Paint().apply {
+            color = Color.parseColor("#58A6FF")
+            textSize = min(W, H) * 0.016f * el.scale
+            typeface = Typeface.DEFAULT_BOLD
+            textAlign = Paint.Align.CENTER
+            isAntiAlias = true
+        }
+        canvas.drawText("MMB", cx, cy - 24f * el.scale, mmbPaint)
         canvas.drawText("WHEEL", cx, cy + rect.height() * 0.62f, subTextPaint)
     }
 
@@ -516,6 +573,11 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
                 canvas.drawCircle(cx, cy, r, selectedOutlinePaint)
             }
             ElementType.BUTTON -> {
+                val hasRot = el.rotation != 0f
+                if (hasRot) {
+                    canvas.save()
+                    canvas.rotate(el.rotation, cx, cy)
+                }
                 when (el.shape) {
                     ButtonShape.CIRCLE -> {
                         val r = getButtonRadius(el, H) + 8f
@@ -531,6 +593,9 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
                         rect.inset(-8f, -8f)
                         canvas.drawRoundRect(rect, 22f, 22f, selectedOutlinePaint)
                     }
+                }
+                if (hasRot) {
+                    canvas.restore()
                 }
             }
             ElementType.SCROLL_WHEEL -> {
@@ -634,6 +699,39 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
         return RectF(cx - halfW, cy - halfH, cx + halfW, cy + halfH)
     }
 
+    fun getGearBadgeRadius(el: HudElement, H: Float): Float {
+        return (H * 0.024f * el.scale).coerceIn(15f, 30f)
+    }
+
+    fun getGearBadgeCenter(el: HudElement, cx: Float, cy: Float, W: Float, H: Float): Pair<Float, Float> {
+        val (localX, localY) = when (el.shape) {
+            ButtonShape.CIRCLE -> {
+                val r = getButtonRadius(el, H)
+                val offset = r * 0.72f
+                Pair(cx + offset, cy - offset)
+            }
+            ButtonShape.SQUARE -> {
+                val halfSide = H * 0.075f * el.scale
+                val offset = halfSide * 0.82f
+                Pair(cx + offset, cy - offset)
+            }
+            ButtonShape.ROUNDED_RECT -> {
+                val rect = getButtonRect(el, cx, cy, W, H)
+                Pair(rect.right - 14f * el.scale, rect.top + 14f * el.scale)
+            }
+        }
+        return if (el.rotation != 0f) {
+            val rad = Math.toRadians(el.rotation.toDouble())
+            val cos = Math.cos(rad).toFloat()
+            val sin = Math.sin(rad).toFloat()
+            val dx = localX - cx
+            val dy = localY - cy
+            Pair(cx + dx * cos - dy * sin, cy + dx * sin + dy * cos)
+        } else {
+            Pair(localX, localY)
+        }
+    }
+
     // -------------------------------------------------------------------
     // Touch Hit Testing
     // -------------------------------------------------------------------
@@ -661,18 +759,28 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
                     if (rect.contains(x, y)) return el
                 }
                 ElementType.BUTTON -> {
+                    val (testX, testY) = if (el.rotation != 0f) {
+                        val rad = Math.toRadians(-el.rotation.toDouble())
+                        val cos = Math.cos(rad).toFloat()
+                        val sin = Math.sin(rad).toFloat()
+                        val dx = x - cx
+                        val dy = y - cy
+                        Pair(cx + dx * cos - dy * sin, cy + dx * sin + dy * cos)
+                    } else {
+                        Pair(x, y)
+                    }
                     when (el.shape) {
                         ButtonShape.CIRCLE -> {
                             val r = getButtonRadius(el, H)
-                            if (hypot(x - cx, y - cy) <= r) return el
+                            if (hypot(testX - cx, testY - cy) <= r) return el
                         }
                         ButtonShape.SQUARE -> {
                             val rect = getButtonSquare(el, cx, cy, H)
-                            if (rect.contains(x, y)) return el
+                            if (rect.contains(testX, testY)) return el
                         }
                         ButtonShape.ROUNDED_RECT -> {
                             val rect = getButtonRect(el, cx, cy, W, H)
-                            if (rect.contains(x, y)) return el
+                            if (rect.contains(testX, testY)) return el
                         }
                     }
                 }
@@ -716,6 +824,29 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
                 dragPointerId = event.getPointerId(0)
                 dragStartFingerX = event.x
                 dragStartFingerY = event.y
+
+                val W = width.toFloat()
+                val H = height.toFloat()
+
+                // Check if user tapped the gear icon badge on any BUTTON element first
+                val gearTarget = elements.filter { it.type == ElementType.BUTTON }
+                    .sortedByDescending { it.zOrder }
+                    .firstOrNull { btnEl ->
+                        val btnCx = btnEl.xPct * W
+                        val btnCy = btnEl.yPct * H
+                        val (gx, gy) = getGearBadgeCenter(btnEl, btnCx, btnCy, W, H)
+                        val gr = getGearBadgeRadius(btnEl, H)
+                        val touchRadius = (gr * 1.5f).coerceAtLeast(32f)
+                        hypot(event.x - gx, event.y - gy) <= touchRadius
+                    }
+
+                if (gearTarget != null) {
+                    selectedElement = gearTarget
+                    onElementSelected?.invoke(gearTarget)
+                    invalidate()
+                    onOpenKeySettingsRequested?.invoke(gearTarget)
+                    return true
+                }
 
                 val clicked = findElementAt(event.x, event.y)
                 selectedElement = clicked
@@ -810,6 +941,9 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
                 ElementType.SCROLL_WHEEL -> {
                     pointerZone[id] = "scroll_wheel"
                     lastWheelY = y
+                    wheelDownY = y
+                    wheelDownTime = System.currentTimeMillis()
+                    wheelScrolledSteps = 0
                     wheelAccumDy = 0f
                     hapticHelper.click()
                 }
@@ -876,10 +1010,11 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
                 val dy = y - lastWheelY
                 lastWheelY = y
                 wheelAccumDy += dy
-                val stepThreshold = 22f
+                val stepThreshold = 18f
                 while (wheelAccumDy <= -stepThreshold) {
                     onWheelScroll?.invoke(120)
                     hapticHelper.tick()
+                    wheelScrolledSteps++
                     wheelAccumDy += stepThreshold
                     if (isRecordingMacro) {
                         val now = System.currentTimeMillis()
@@ -890,6 +1025,7 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
                 while (wheelAccumDy >= stepThreshold) {
                     onWheelScroll?.invoke(-120)
                     hapticHelper.tick()
+                    wheelScrolledSteps++
                     wheelAccumDy -= stepThreshold
                     if (isRecordingMacro) {
                         val now = System.currentTimeMillis()
@@ -937,7 +1073,21 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
                 lastDpadQuadrant = -1
             }
             "scroll_wheel" -> {
-                // Wheel gesture ended
+                val elapsed = System.currentTimeMillis() - wheelDownTime
+                val movement = kotlin.math.abs(lastWheelY - wheelDownY)
+                if (wheelScrolledSteps == 0 && elapsed < 350L && movement < 32f) {
+                    // Tap on Scroll Wheel = Middle Mouse Button (MMB / Ping) Click!
+                    hapticHelper.heavyClick()
+                    onMiddleClick?.invoke(true)
+                    postDelayed({
+                        onMiddleClick?.invoke(false)
+                    }, 60L)
+                    if (isRecordingMacro) {
+                        val now = System.currentTimeMillis()
+                        onMacroEventRecorded?.invoke("mouse_middle", true, now)
+                        onMacroEventRecorded?.invoke("mouse_middle", false, now + 60)
+                    }
+                }
             }
             "look" -> {
                 lookPointerId = null
@@ -1145,6 +1295,24 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
                 invalidate()
                 onLayoutChanged?.invoke()
             }
+        }
+    }
+
+    fun updateSelectedRotation(angleDeg: Float) {
+        selectedElement?.let {
+            if (it.type == ElementType.BUTTON) {
+                it.rotation = ((angleDeg % 360f) + 360f) % 360f
+                invalidate()
+                onLayoutChanged?.invoke()
+            }
+        }
+    }
+
+    fun updateSelectedLabel(newLabel: String) {
+        selectedElement?.let {
+            it.label = newLabel
+            invalidate()
+            onLayoutChanged?.invoke()
         }
     }
 

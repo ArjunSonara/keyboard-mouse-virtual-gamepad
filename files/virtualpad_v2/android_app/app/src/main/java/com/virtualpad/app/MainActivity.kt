@@ -65,6 +65,7 @@ class MainActivity : Activity(), SensorEventListener {
     private lateinit var dpadLeftBtn: Button
     private lateinit var dpadRightBtn: Button
     private lateinit var buttonControlsRow: LinearLayout
+    private lateinit var keySettingsButton: Button
 
     // Macro Studio & Live Recording
     private var liveRecordingTarget: HudElement? = null
@@ -115,6 +116,7 @@ class MainActivity : Activity(), SensorEventListener {
         controllerView.hudOpacity = HudConfig.getHudOpacity(this)
         controllerView.onStateChanged = { state -> networkClient.submit(state) }
         controllerView.onWheelScroll = { delta -> networkClient.sendScrollWheel(delta) }
+        controllerView.onMiddleClick = { pressed -> networkClient.sendMacroKey("mouse_middle", pressed) }
         controllerView.onMacroKeyRequested = { key, pressed -> networkClient.sendMacroKey(key, pressed) }
         controllerView.onMacroEventRecorded = { key, isDown, timeMs ->
             recordedEvents.add(RecordedInputEvent(key, isDown, timeMs))
@@ -122,6 +124,13 @@ class MainActivity : Activity(), SensorEventListener {
                 val count = recordedEvents.count { it.isDown }
                 recTitleText?.text = "🔴 RECORDING ($count taps) | Last: ${key.uppercase()} | Tap buttons..."
             }
+        }
+        controllerView.onOpenKeySettingsRequested = { el ->
+            showKeySettingsDialog(el)
+        }
+        controllerView.onLayoutChanged = {
+            val keymap = HudConfig.extractKeymap(controllerView.elements)
+            networkClient.sendKeymapSync(keymap)
         }
         root.addView(
             controllerView,
@@ -162,6 +171,8 @@ class MainActivity : Activity(), SensorEventListener {
         gyroscopeSensor?.let {
             sensorManager?.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME)
         }
+        val keymap = HudConfig.extractKeymap(controllerView.elements)
+        networkClient.sendKeymapSync(keymap)
     }
 
     override fun onPause() {
@@ -930,6 +941,22 @@ class MainActivity : Activity(), SensorEventListener {
         }
         buttonControlsRow.addView(bindKeyButton, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { rightMargin = 14 })
 
+        keySettingsButton = Button(this).apply {
+            text = "⚙️ Key Settings"
+            textSize = 12f
+            setTextColor(Color.WHITE)
+            background = createCardDrawable(Color.parseColor("#8957E5"), 12f)
+            setPadding(18, 6, 18, 6)
+            setOnClickListener {
+                controllerView.selectedElement?.let { el ->
+                    if (el.type == ElementType.BUTTON) {
+                        showKeySettingsDialog(el)
+                    }
+                }
+            }
+        }
+        buttonControlsRow.addView(keySettingsButton, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { rightMargin = 14 })
+
         shapeButton = Button(this).apply {
             text = "Shape: Circle"
             textSize = 12f
@@ -1070,6 +1097,8 @@ class MainActivity : Activity(), SensorEventListener {
             macroButton.text = "Macro: OFF"
             deleteButton.isEnabled = false
             deleteButton.alpha = 0.4f
+            keySettingsButton.isEnabled = false
+            keySettingsButton.alpha = 0.4f
         } else {
             scaleSeekBar.isEnabled = true
             scaleSeekBar.progress = (el.scale * 100).toInt()
@@ -1098,6 +1127,9 @@ class MainActivity : Activity(), SensorEventListener {
 
                     buttonControlsRow.visibility = View.VISIBLE
                     dpadControlsRow.visibility = View.GONE
+
+                    keySettingsButton.isEnabled = true
+                    keySettingsButton.alpha = 1.0f
 
                     bindKeyButton.isEnabled = true
                     bindKeyButton.alpha = 1.0f
@@ -1137,6 +1169,8 @@ class MainActivity : Activity(), SensorEventListener {
                     inspectorTitle.text = "Selected: Movement Stick (Push > 80% to Sprint, drag to 🏃 to Lock Auto-Run)"
                     buttonControlsRow.visibility = View.VISIBLE
                     dpadControlsRow.visibility = View.GONE
+                    keySettingsButton.isEnabled = false
+                    keySettingsButton.alpha = 0.4f
                     bindKeyButton.isEnabled = false
                     bindKeyButton.alpha = 0.4f
                     bindKeyButton.text = "WASD (Move)"
@@ -2009,8 +2043,8 @@ class MainActivity : Activity(), SensorEventListener {
         updateUi()
     }
 
-    private fun showKeyPickerDialog() {
-        val selected = controllerView.selectedElement ?: return
+    private fun showKeyPickerDialog(targetEl: HudElement? = null, onKeyChosen: ((String) -> Unit)? = null) {
+        val selected = targetEl ?: controllerView.selectedElement ?: return
         val names = VALID_KEY_LIST.map { "${it.displayName} [${it.code}]" }.toTypedArray()
 
         AlertDialog.Builder(this)
@@ -2018,17 +2052,538 @@ class MainActivity : Activity(), SensorEventListener {
             .setItems(names) { _, which ->
                 val chosen = VALID_KEY_LIST[which]
                 val keyDisplay = formatKeyDisplay(chosen.code)
-                val newLabel = if (selected.isCustom) {
+                val newLabel = if (selected.label.isNotEmpty() && !selected.label.startsWith("C") && !selected.label.startsWith(selected.id.uppercase())) {
+                    selected.label
+                } else if (selected.isCustom) {
                     "C${selected.customSlot + 1} ($keyDisplay)"
                 } else {
                     "${selected.id.uppercase()} ($keyDisplay)"
                 }
                 controllerView.updateSelectedKey(chosen.code, newLabel)
                 updateInspector(selected)
+                onKeyChosen?.invoke(chosen.code)
                 Toast.makeText(this, "Assigned key: ${chosen.displayName}", Toast.LENGTH_SHORT).show()
             }
             .setNegativeButton("Cancel", null)
             .show()
+    }
+
+    private fun showKeySettingsDialog(targetElement: HudElement? = null) {
+        val selected = targetElement ?: controllerView.selectedElement ?: return
+        if (selected.type != ElementType.BUTTON) return
+
+        controllerView.selectElement(selected)
+
+        val dialog = AlertDialog.Builder(this).create()
+        val dialogView = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(28, 16, 28, 16)
+            background = createCardDrawable(Color.parseColor("#161B22"), 20f, Color.parseColor("#30363D"), 2)
+        }
+
+        // --- 1. Header Row ---
+        val headerRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, 0, 0, 10)
+        }
+        val titleText = TextView(this).apply {
+            text = "⚙️ Key Settings & Stats: ${selected.label.ifEmpty { selected.id.uppercase() }}"
+            textSize = 17f
+            setTextColor(Color.WHITE)
+            setTypeface(null, android.graphics.Typeface.BOLD)
+        }
+        headerRow.addView(titleText, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+
+        val closeBtn = Button(this).apply {
+            text = "✕"
+            textSize = 15f
+            setTextColor(Color.parseColor("#8B949E"))
+            background = null
+            setPadding(8, 0, 8, 0)
+            setOnClickListener { dialog.dismiss() }
+        }
+        headerRow.addView(closeBtn, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+        dialogView.addView(headerRow)
+
+        // --- 2. Main Two-Column Content ---
+        val columnsLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, 4, 0, 8)
+        }
+
+        // === LEFT COLUMN (Key Name, Binding, and Live Stats Card) ===
+        val leftCol = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, 0, 16, 0)
+        }
+
+        // Key Name / Label Section
+        val nameLabel = TextView(this).apply {
+            text = "KEY NAME / LABEL:"
+            textSize = 11f
+            setTextColor(Color.parseColor("#58A6FF"))
+            setTypeface(null, android.graphics.Typeface.BOLD)
+            setPadding(0, 0, 0, 4)
+        }
+        leftCol.addView(nameLabel)
+
+        val nameInputRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val nameEdit = EditText(this).apply {
+            setText(selected.label.ifEmpty { selected.id.uppercase() })
+            textSize = 13f
+            setTextColor(Color.WHITE)
+            setHintTextColor(Color.parseColor("#6E7681"))
+            hint = "Button Label"
+            background = createCardDrawable(Color.parseColor("#0D1117"), 10f, Color.parseColor("#30363D"), 1)
+            setPadding(20, 12, 20, 12)
+            isSingleLine = true
+        }
+        nameInputRow.addView(nameEdit, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+
+        val applyNameBtn = Button(this).apply {
+            text = "Apply"
+            textSize = 11f
+            setTextColor(Color.WHITE)
+            background = createCardDrawable(Color.parseColor("#238636"), 10f)
+            setPadding(16, 6, 16, 6)
+            setOnClickListener {
+                val newName = nameEdit.text.toString().trim()
+                if (newName.isNotEmpty()) {
+                    controllerView.updateSelectedLabel(newName)
+                    titleText.text = "⚙️ Key Settings & Stats: $newName"
+                    updateInspector(selected)
+                    Toast.makeText(this@MainActivity, "Label updated to: $newName", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+        nameInputRow.addView(applyNameBtn, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { leftMargin = 8 })
+        leftCol.addView(nameInputRow)
+
+        // Quick Preset Label Chips (Aim, Shoot, Reload, Jump, Crouch, Heal, Sprint, Cover, Map, Ping)
+        val chipScroll = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            setPadding(0, 8, 0, 8)
+        }
+        val chipRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val quickLabels = listOf("Aim", "Shoot", "Reload", "Jump", "Crouch", "Sprint", "Heal", "Cover", "Map", "Ping", "Ability")
+        for (qLabel in quickLabels) {
+            val chip = Button(this).apply {
+                text = qLabel
+                textSize = 10f
+                setTextColor(Color.parseColor("#C9D1D9"))
+                background = createCardDrawable(Color.parseColor("#21262D"), 8f)
+                setPadding(12, 4, 12, 4)
+                setOnClickListener {
+                    nameEdit.setText(qLabel)
+                    controllerView.updateSelectedLabel(qLabel)
+                    titleText.text = "⚙️ Key Settings & Stats: $qLabel"
+                    updateInspector(selected)
+                }
+            }
+            chipRow.addView(chip, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { rightMargin = 6 })
+        }
+        chipScroll.addView(chipRow)
+        leftCol.addView(chipScroll)
+
+        // PC Key Binding Picker
+        val bindKeyBtn = Button(this).apply {
+            text = "⌨️ Bound Key: ${formatKeyDisplay(selected.key)} [${selected.key}]"
+            textSize = 12f
+            setTextColor(Color.WHITE)
+            background = createCardDrawable(Color.parseColor("#1F6FEB"), 10f)
+            setPadding(16, 10, 16, 10)
+            setOnClickListener {
+                showKeyPickerDialog(selected) { newKey ->
+                    text = "⌨️ Bound Key: ${formatKeyDisplay(newKey)} [$newKey]"
+                    updateInspector(selected)
+                }
+            }
+        }
+        leftCol.addView(bindKeyBtn, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { topMargin = 6; bottomMargin = 10 })
+
+        // Live Key Stats Card
+        val statsCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = createCardDrawable(Color.parseColor("#0D1117"), 12f, Color.parseColor("#30363D"), 1)
+            setPadding(16, 12, 16, 12)
+        }
+        val statsHeader = TextView(this).apply {
+            text = "📊 LIVE KEY STATS"
+            textSize = 11f
+            setTextColor(Color.parseColor("#58A6FF"))
+            setTypeface(null, android.graphics.Typeface.BOLD)
+            setPadding(0, 0, 0, 6)
+        }
+        statsCard.addView(statsHeader)
+
+        val statsModeText = TextView(this).apply { textSize = 11f; setTextColor(Color.parseColor("#C9D1D9")); setPadding(0, 2, 0, 2) }
+        val statsShapeText = TextView(this).apply { textSize = 11f; setTextColor(Color.parseColor("#C9D1D9")); setPadding(0, 2, 0, 2) }
+        val statsRotationText = TextView(this).apply { textSize = 11f; setTextColor(Color.parseColor("#C9D1D9")); setPadding(0, 2, 0, 2) }
+        val statsScaleText = TextView(this).apply { textSize = 11f; setTextColor(Color.parseColor("#C9D1D9")); setPadding(0, 2, 0, 2) }
+        val statsMacroText = TextView(this).apply { textSize = 11f; setTextColor(Color.parseColor("#C9D1D9")); setPadding(0, 2, 0, 2) }
+
+        statsCard.addView(statsModeText)
+        statsCard.addView(statsShapeText)
+        statsCard.addView(statsRotationText)
+        statsCard.addView(statsScaleText)
+        statsCard.addView(statsMacroText)
+        leftCol.addView(statsCard, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+
+        columnsLayout.addView(leftCol, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.05f))
+
+        // === RIGHT COLUMN (Shape, Rotation Slider, Mode & Turbo CPS, Scale, Actions) in ScrollView ===
+        val rightScroll = ScrollView(this).apply {
+            isVerticalScrollBarEnabled = true
+        }
+        val rightCol = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(8, 0, 0, 0)
+        }
+
+        // --- SECTION A: Key Shape Selection ---
+        val shapeLabel = TextView(this).apply {
+            text = "KEY SHAPE:"
+            textSize = 11f
+            setTextColor(Color.parseColor("#58A6FF"))
+            setTypeface(null, android.graphics.Typeface.BOLD)
+            setPadding(0, 0, 0, 4)
+        }
+        rightCol.addView(shapeLabel)
+
+        val shapeRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val shapeBtns = mutableListOf<Button>()
+        val shapes = listOf(ButtonShape.CIRCLE to "⚪ Circle", ButtonShape.SQUARE to "⬛ Square", ButtonShape.ROUNDED_RECT to "💊 Pill")
+
+        fun updateShapeButtons() {
+            shapes.forEachIndexed { idx, (shape, _) ->
+                val btn = shapeBtns[idx]
+                if (selected.shape == shape) {
+                    btn.background = createCardDrawable(Color.parseColor("#1F6FEB"), 10f)
+                    btn.setTextColor(Color.WHITE)
+                } else {
+                    btn.background = createCardDrawable(Color.parseColor("#21262D"), 10f)
+                    btn.setTextColor(Color.parseColor("#8B949E"))
+                }
+            }
+        }
+
+        fun updateStatsCard() {
+            statsModeText.text = "• Mode: " + when {
+                selected.isTurbo -> "Turbo Rapid-Fire (${selected.turboCps} CPS)"
+                selected.isToggle -> "Toggle Latch 🔒"
+                else -> "Normal Hold ⏱️"
+            }
+            statsShapeText.text = "• Shape: " + when (selected.shape) {
+                ButtonShape.CIRCLE -> "Circle (360°)"
+                ButtonShape.SQUARE -> "Square"
+                ButtonShape.ROUNDED_RECT -> "Rounded Pill"
+            }
+            statsRotationText.text = "• Rotation: ${selected.rotation.toInt()}°"
+            statsScaleText.text = "• Scale: ${String.format("%.2f", selected.scale)}x"
+            statsMacroText.text = "• Macro: " + if (selected.macroType.isNotEmpty() || selected.customMacro.isNotEmpty()) "Active ⚡" else "Disabled"
+        }
+
+        shapes.forEach { (shape, label) ->
+            val btn = Button(this).apply {
+                text = label
+                textSize = 11f
+                setPadding(14, 6, 14, 6)
+                setOnClickListener {
+                    controllerView.updateSelectedShape(shape)
+                    updateShapeButtons()
+                    updateStatsCard()
+                    updateInspector(selected)
+                }
+            }
+            shapeBtns.add(btn)
+            shapeRow.addView(btn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = 6 })
+        }
+        updateShapeButtons()
+        rightCol.addView(shapeRow)
+
+        // --- SECTION B: Key Shape Rotation ---
+        val rotLabel = TextView(this).apply {
+            text = "KEY ROTATION: ${selected.rotation.toInt()}°"
+            textSize = 11f
+            setTextColor(Color.parseColor("#58A6FF"))
+            setTypeface(null, android.graphics.Typeface.BOLD)
+            setPadding(0, 10, 0, 4)
+        }
+        rightCol.addView(rotLabel)
+
+        val rotSeekBar = SeekBar(this).apply {
+            max = 360
+            progress = selected.rotation.toInt()
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar?, prog: Int, fromUser: Boolean) {
+                    rotLabel.text = "KEY ROTATION: ${prog}°"
+                    if (fromUser) {
+                        controllerView.updateSelectedRotation(prog.toFloat())
+                        updateStatsCard()
+                        updateInspector(selected)
+                    }
+                }
+                override fun onStartTrackingTouch(sb: SeekBar?) {}
+                override fun onStopTrackingTouch(sb: SeekBar?) {}
+            })
+        }
+        rightCol.addView(rotSeekBar, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+
+        // Quick Angle Snap Chips: 0°, 45°, 90°, 135°, 180°, 270°
+        val angleSnapScroll = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            setPadding(0, 4, 0, 8)
+        }
+        val angleSnapRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val snapAngles = listOf(0, 45, 90, 135, 180, 270)
+        for (ang in snapAngles) {
+            val angBtn = Button(this).apply {
+                text = "$ang°"
+                textSize = 10f
+                setTextColor(Color.parseColor("#C9D1D9"))
+                background = createCardDrawable(Color.parseColor("#21262D"), 8f)
+                setPadding(12, 4, 12, 4)
+                setOnClickListener {
+                    rotSeekBar.progress = ang
+                    rotLabel.text = "KEY ROTATION: ${ang}°"
+                    controllerView.updateSelectedRotation(ang.toFloat())
+                    updateStatsCard()
+                    updateInspector(selected)
+                }
+            }
+            angleSnapRow.addView(angBtn, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { rightMargin = 6 })
+        }
+        angleSnapScroll.addView(angleSnapRow)
+        rightCol.addView(angleSnapScroll)
+
+        // --- SECTION C: Mode Selection (Hold / Toggle / Turbo) ---
+        val modeHeader = TextView(this).apply {
+            text = "INPUT BEHAVIOR MODE:"
+            textSize = 11f
+            setTextColor(Color.parseColor("#58A6FF"))
+            setTypeface(null, android.graphics.Typeface.BOLD)
+            setPadding(0, 6, 0, 4)
+        }
+        rightCol.addView(modeHeader)
+
+        val modeRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val modeBtns = mutableListOf<Button>()
+        val modes = listOf("HOLD" to "Hold ⏱️", "TOGGLE" to "Toggle 🔒", "TURBO" to "Turbo ⚡")
+
+        val turboContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, 6, 0, 6)
+            visibility = if (selected.isTurbo) View.VISIBLE else View.GONE
+        }
+
+        fun updateModeButtons() {
+            val currentMode = when {
+                selected.isTurbo -> "TURBO"
+                selected.isToggle -> "TOGGLE"
+                else -> "HOLD"
+            }
+            modes.forEachIndexed { idx, (modeCode, _) ->
+                val btn = modeBtns[idx]
+                if (currentMode == modeCode) {
+                    val color = if (modeCode == "TURBO") "#FFD600" else "#1F6FEB"
+                    val textColor = if (modeCode == "TURBO") Color.BLACK else Color.WHITE
+                    btn.background = createCardDrawable(Color.parseColor(color), 10f)
+                    btn.setTextColor(textColor)
+                } else {
+                    btn.background = createCardDrawable(Color.parseColor("#21262D"), 10f)
+                    btn.setTextColor(Color.parseColor("#8B949E"))
+                }
+            }
+            turboContainer.visibility = if (selected.isTurbo) View.VISIBLE else View.GONE
+        }
+
+        modes.forEach { (modeCode, modeTitle) ->
+            val btn = Button(this).apply {
+                text = modeTitle
+                textSize = 11f
+                setPadding(12, 6, 12, 6)
+                setOnClickListener {
+                    when (modeCode) {
+                        "HOLD" -> controllerView.updateSelectedButtonMode(isToggle = false, isTurbo = false)
+                        "TOGGLE" -> controllerView.updateSelectedButtonMode(isToggle = true, isTurbo = false)
+                        "TURBO" -> controllerView.updateSelectedButtonMode(isToggle = false, isTurbo = true)
+                    }
+                    updateModeButtons()
+                    updateStatsCard()
+                    updateInspector(selected)
+                }
+            }
+            modeBtns.add(btn)
+            modeRow.addView(btn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = 6 })
+        }
+        updateModeButtons()
+        rightCol.addView(modeRow)
+
+        // Turbo CPS Controls (Slider + Preset chips: 6, 10, 12, 16, 20, 25, 30)
+        val cpsLabel = TextView(this).apply {
+            text = "⚡ TURBO RATE: ${selected.turboCps} CPS (Clicks / Sec)"
+            textSize = 10f
+            setTextColor(Color.parseColor("#FFD600"))
+            setPadding(0, 4, 0, 2)
+        }
+        turboContainer.addView(cpsLabel)
+
+        val cpsSeekBar = SeekBar(this).apply {
+            max = 26 // 4 + 26 = 30
+            progress = (selected.turboCps - 4).coerceIn(0, 26)
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar?, prog: Int, fromUser: Boolean) {
+                    val rate = prog + 4
+                    cpsLabel.text = "⚡ TURBO RATE: $rate CPS (Clicks / Sec)"
+                    if (fromUser) {
+                        controllerView.updateSelectedButtonMode(isToggle = false, isTurbo = true, turboCps = rate)
+                        updateStatsCard()
+                        updateInspector(selected)
+                    }
+                }
+                override fun onStartTrackingTouch(sb: SeekBar?) {}
+                override fun onStopTrackingTouch(sb: SeekBar?) {}
+            })
+        }
+        turboContainer.addView(cpsSeekBar, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+
+        val cpsChipScroll = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            setPadding(0, 2, 0, 4)
+        }
+        val cpsChipRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val cpsPresets = listOf(6, 10, 12, 16, 20, 25, 30)
+        for (cps in cpsPresets) {
+            val chip = Button(this).apply {
+                text = "${cps} CPS"
+                textSize = 9f
+                setTextColor(Color.parseColor("#FFD600"))
+                background = createCardDrawable(Color.parseColor("#3D3200"), 6f, Color.parseColor("#FFD600"), 1)
+                setPadding(10, 3, 10, 3)
+                setOnClickListener {
+                    cpsSeekBar.progress = cps - 4
+                    cpsLabel.text = "⚡ TURBO RATE: $cps CPS (Clicks / Sec)"
+                    controllerView.updateSelectedButtonMode(isToggle = false, isTurbo = true, turboCps = cps)
+                    updateStatsCard()
+                    updateInspector(selected)
+                }
+            }
+            cpsChipRow.addView(chip, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { rightMargin = 6 })
+        }
+        cpsChipScroll.addView(cpsChipRow)
+        turboContainer.addView(cpsChipScroll)
+        rightCol.addView(turboContainer)
+
+        // --- SECTION D: Size / Scale ---
+        val scaleLabel = TextView(this).apply {
+            text = "BUTTON SIZE: ${String.format("%.2f", selected.scale)}x"
+            textSize = 11f
+            setTextColor(Color.parseColor("#58A6FF"))
+            setTypeface(null, android.graphics.Typeface.BOLD)
+            setPadding(0, 8, 0, 4)
+        }
+        rightCol.addView(scaleLabel)
+
+        val sizeSeekBar = SeekBar(this).apply {
+            max = 170 // 50 to 220 -> 0.50x to 2.20x
+            progress = ((selected.scale * 100).toInt() - 50).coerceIn(0, 170)
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar?, prog: Int, fromUser: Boolean) {
+                    val scale = (prog + 50) / 100f
+                    scaleLabel.text = "BUTTON SIZE: ${String.format("%.2f", scale)}x"
+                    if (fromUser) {
+                        controllerView.updateSelectedScale(scale)
+                        updateStatsCard()
+                        updateInspector(selected)
+                    }
+                }
+                override fun onStartTrackingTouch(sb: SeekBar?) {}
+                override fun onStopTrackingTouch(sb: SeekBar?) {}
+            })
+        }
+        rightCol.addView(sizeSeekBar, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+
+        // --- SECTION E: Macro Studio & Delete Buttons ---
+        val actionRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, 10, 0, 0)
+        }
+
+        val macroBtn = Button(this).apply {
+            text = "⚡ Macro Studio"
+            textSize = 11f
+            setTextColor(Color.parseColor("#E040FB"))
+            background = createCardDrawable(Color.parseColor("#34143D"), 10f, Color.parseColor("#E040FB"), 1)
+            setPadding(14, 8, 14, 8)
+            setOnClickListener {
+                dialog.dismiss()
+                showMacroStudioDialog(selected)
+            }
+        }
+        actionRow.addView(macroBtn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = 8 })
+
+        if (selected.isCustom) {
+            val delBtn = Button(this).apply {
+                text = "🗑️ Delete"
+                textSize = 11f
+                setTextColor(Color.parseColor("#FF6B6B"))
+                background = createCardDrawable(Color.parseColor("#491818"), 10f)
+                setPadding(14, 8, 14, 8)
+                setOnClickListener {
+                    if (controllerView.deleteSelectedElement()) {
+                        Toast.makeText(this@MainActivity, "Button deleted", Toast.LENGTH_SHORT).show()
+                        dialog.dismiss()
+                    }
+                }
+            }
+            actionRow.addView(delBtn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        }
+
+        rightCol.addView(actionRow)
+        rightScroll.addView(rightCol)
+        columnsLayout.addView(rightScroll, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.15f))
+
+        dialogView.addView(columnsLayout)
+
+        updateStatsCard()
+
+        // --- 3. Footer Bar ---
+        val footerRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.END
+            setPadding(0, 10, 0, 0)
+        }
+        val doneBtn = Button(this).apply {
+            text = "✓ Done"
+            textSize = 13f
+            setTextColor(Color.WHITE)
+            setTypeface(null, android.graphics.Typeface.BOLD)
+            background = createCardDrawable(Color.parseColor("#238636"), 12f)
+            setPadding(32, 10, 32, 10)
+            setOnClickListener {
+                val newName = nameEdit.text.toString().trim()
+                if (newName.isNotEmpty() && newName != selected.label) {
+                    controllerView.updateSelectedLabel(newName)
+                }
+                updateInspector(selected)
+                dialog.dismiss()
+            }
+        }
+        footerRow.addView(doneBtn)
+        dialogView.addView(footerRow)
+
+        dialog.setView(dialogView)
+        dialog.show()
+        dialog.window?.let { w ->
+            val dm = resources.displayMetrics
+            val targetWidth = (dm.widthPixels * 0.90f).toInt()
+            val targetHeight = (dm.heightPixels * 0.92f).toInt()
+            w.setLayout(targetWidth, targetHeight)
+        }
     }
 
     private fun showDpadKeyPickerDialog(direction: String) {
@@ -2111,6 +2666,8 @@ class MainActivity : Activity(), SensorEventListener {
     private fun switchToUsb() {
         networkClient.mode = TransportMode.USB
         prefs.edit().putString("mode", "USB").apply()
+        val keymap = HudConfig.extractKeymap(controllerView.elements)
+        networkClient.activeKeymap = keymap
         networkClient.connectUsb { _ ->
             runOnUiThread {
                 Toast.makeText(
@@ -2120,10 +2677,7 @@ class MainActivity : Activity(), SensorEventListener {
                 ).show()
             }
         }
-        runOnUiThread {
-            val keymap = HudConfig.extractKeymap(controllerView.elements)
-            networkClient.sendKeymapSync(keymap)
-        }
+        networkClient.sendKeymapSync(keymap)
     }
 
     private fun showConnectionDialog() {

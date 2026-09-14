@@ -151,6 +151,7 @@ def _actually_set_key(key: str, should_hold: bool):
     mouse_btn = MOUSE_BUTTON_MAP.get(key.lower())
 
     if mouse_btn:
+        print(f"[Input] Mouse '{mouse_btn}' {'DOWN' if should_hold else 'UP'}", flush=True)
         down_flag, up_flag = MOUSE_EVENT_FLAGS[mouse_btn]
         if should_hold and not is_held:
             try:
@@ -158,9 +159,15 @@ def _actually_set_key(key: str, should_hold: bool):
             except Exception:
                 pass
             try:
-                ctx = interception.hold_mouse(mouse_btn)
-                ctx.__enter__()
-                _held_ctx[key] = ctx
+                if _interception_ctx and _interception_ctx.mouse:
+                    btn_state = interception.inputs._get_button_states(mouse_btn, down=True)
+                    stroke = interception.MouseStroke(
+                        interception.MouseFlag.MOUSE_MOVE_RELATIVE,
+                        btn_state,
+                        0, 0, 0
+                    )
+                    _interception_ctx.send(_interception_ctx.mouse, stroke)
+                _held_ctx[key] = True
             except Exception:
                 _held_ctx[key] = True
         elif not should_hold and is_held:
@@ -168,12 +175,18 @@ def _actually_set_key(key: str, should_hold: bool):
                 ctypes.windll.user32.mouse_event(up_flag, 0, 0, 0, 0)
             except Exception:
                 pass
-            ctx = _held_ctx.pop(key, None)
-            if ctx and ctx is not True:
-                try:
-                    ctx.__exit__(None, None, None)
-                except Exception:
-                    pass
+            try:
+                if _interception_ctx and _interception_ctx.mouse:
+                    btn_state = interception.inputs._get_button_states(mouse_btn, down=False)
+                    stroke = interception.MouseStroke(
+                        interception.MouseFlag.MOUSE_MOVE_RELATIVE,
+                        btn_state,
+                        0, 0, 0
+                    )
+                    _interception_ctx.send(_interception_ctx.mouse, stroke)
+            except Exception:
+                pass
+            _held_ctx.pop(key, None)
     else:
         if should_hold and not is_held:
             try:
@@ -261,10 +274,24 @@ def handle_wheel_packet(data: bytes):
         return
     wheel_delta = struct.unpack("<h", data[1:3])[0]
     if wheel_delta != 0:
+        print(f"[Input] Wheel delta: {wheel_delta}", flush=True)
         try:
             ctypes.windll.user32.mouse_event(0x0800, 0, 0, int(wheel_delta), 0)
         except Exception:
             pass
+        if _interception_ctx and _interception_ctx.mouse:
+            try:
+                button_data = 120 if wheel_delta > 0 else 65416
+                stroke = interception.MouseStroke(
+                    interception.MouseFlag.MOUSE_MOVE_RELATIVE,
+                    interception.MouseButtonFlag.MOUSE_WHEEL,
+                    button_data,
+                    0,
+                    0
+                )
+                _interception_ctx.send(_interception_ctx.mouse, stroke)
+            except Exception:
+                pass
 
 def handle_macro_key_packet(data: bytes):
     if len(data) < 3:
@@ -273,6 +300,7 @@ def handle_macro_key_packet(data: bytes):
     try:
         key = data[2:].decode("utf-8").strip().lower()
         if key:
+            print(f"[Input] Macro key: '{key}' {'DOWN' if pressed else 'UP'}", flush=True)
             request_key(key, "macro", pressed)
     except Exception:
         pass
