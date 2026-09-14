@@ -681,6 +681,17 @@ object HudConfig {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit().putBoolean(KEY_STICK_SPRINT_MODE, enabled).apply()
     }
 
+    // Stick Floating / Dynamic Mode
+    private const val KEY_STICK_FLOATING_MODE = "stick_floating_mode"
+
+    fun isStickFloatingMode(context: Context): Boolean {
+        return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getBoolean(KEY_STICK_FLOATING_MODE, false)
+    }
+
+    fun setStickFloatingMode(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit().putBoolean(KEY_STICK_FLOATING_MODE, enabled).apply()
+    }
+
     // Stick Touch Detection Scale
     private const val KEY_STICK_TOUCH_SCALE = "stick_touch_scale"
 

@@ -129,6 +129,7 @@ class MainActivity : Activity(), SensorEventListener {
             showKeySettingsDialog(el)
         }
         controllerView.stickSprintMode = HudConfig.isStickSprintMode(this)
+        controllerView.stickFloatingMode = HudConfig.isStickFloatingMode(this)
         controllerView.stickTouchScale = HudConfig.getStickTouchScale(this)
         controllerView.onOpenStickSettingsRequested = { el ->
             showStickSettingsDialog(el)
@@ -1177,8 +1178,9 @@ class MainActivity : Activity(), SensorEventListener {
                 }
                 ElementType.STICK -> {
                     val modeStr = if (controllerView.stickSprintMode) "⚡ Sprint Mode" else "🚶 Walk Mode"
+                    val floatStr = if (controllerView.stickFloatingMode) " • 📍 Floating" else ""
                     val touchStr = if (controllerView.stickTouchScale > 1.0f) " • Touch Radius: ${String.format("%.1f", controllerView.stickTouchScale)}x" else ""
-                    inspectorTitle.text = "Selected: Movement Stick ($modeStr$touchStr) — Tap ⚙ to change"
+                    inspectorTitle.text = "Selected: Movement Stick ($modeStr$floatStr$touchStr) — Tap ⚙ to change"
                     buttonControlsRow.visibility = View.VISIBLE
                     dpadControlsRow.visibility = View.GONE
                     keySettingsButton.isEnabled = true
@@ -2085,6 +2087,7 @@ class MainActivity : Activity(), SensorEventListener {
         controllerView.selectElement(targetEl)
 
         var selectedSprint = controllerView.stickSprintMode
+        var selectedFloating = controllerView.stickFloatingMode
         var selectedStickTouchScale = controllerView.stickTouchScale
         val initialStickTouchScale = controllerView.stickTouchScale
 
@@ -2236,6 +2239,60 @@ class MainActivity : Activity(), SensorEventListener {
 
         updateSelection()
 
+        // Option 3: Floating / Dynamic Joystick Card
+        val floatingCard = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(16, 14, 16, 14)
+            isClickable = true
+            isFocusable = true
+        }
+        val floatingCheck = CheckBox(this).apply {
+            isClickable = false
+            isFocusable = false
+            isChecked = selectedFloating
+            buttonTintList = android.content.res.ColorStateList.valueOf(Color.parseColor("#58A6FF"))
+        }
+        floatingCard.addView(floatingCheck, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+
+        val floatingTextCol = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(14, 0, 0, 0)
+        }
+        val floatingTitle = TextView(this).apply {
+            text = "📍 Floating / Dynamic Joystick"
+            textSize = 14f
+            setTextColor(Color.WHITE)
+            setTypeface(null, android.graphics.Typeface.BOLD)
+        }
+        val floatingDesc = TextView(this).apply {
+            text = "Auto-spawn joystick at thumb touch in the left empty area"
+            textSize = 12f
+            setTextColor(Color.parseColor("#8B949E"))
+            setPadding(0, 2, 0, 0)
+        }
+        floatingTextCol.addView(floatingTitle)
+        floatingTextCol.addView(floatingDesc)
+        floatingCard.addView(floatingTextCol, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+
+        fun updateFloatingCard() {
+            floatingCheck.isChecked = selectedFloating
+            floatingCard.background = if (selectedFloating) {
+                createCardDrawable(Color.parseColor("#1B2A3D"), 12f, Color.parseColor("#58A6FF"), 2)
+            } else {
+                createCardDrawable(Color.parseColor("#0D1117"), 12f, Color.parseColor("#30363D"), 1)
+            }
+        }
+        floatingCard.setOnClickListener {
+            selectedFloating = !selectedFloating
+            updateFloatingCard()
+        }
+        updateFloatingCard()
+
+        dialogView.addView(floatingCard, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+            topMargin = 10
+        })
+
         // Section: Joystick Outside Touch Detection Area (Catchment Zone)
         val stickAreaLabel = TextView(this).apply {
             text = "🎯 TOUCH DETECTION AREA (OUTSIDE DIRECTION):"
@@ -2322,6 +2379,8 @@ class MainActivity : Activity(), SensorEventListener {
             setOnClickListener {
                 controllerView.stickSprintMode = selectedSprint
                 HudConfig.setStickSprintMode(this@MainActivity, selectedSprint)
+                controllerView.stickFloatingMode = selectedFloating
+                HudConfig.setStickFloatingMode(this@MainActivity, selectedFloating)
                 controllerView.stickTouchScale = selectedStickTouchScale
                 HudConfig.setStickTouchScale(this@MainActivity, selectedStickTouchScale)
                 // Reset any active sprint state when switching to normal
@@ -2329,8 +2388,10 @@ class MainActivity : Activity(), SensorEventListener {
                     controllerView.resetSprint()
                 }
                 updateInspector(targetEl)
+                val statusStr = if (selectedSprint) "⚡ Sprint" else "🚶 Normal"
+                val floatStr = if (selectedFloating) " + 📍 Floating" else ""
                 Toast.makeText(this@MainActivity,
-                    if (selectedSprint) "⚡ Sprint Mode enabled (${String.format("%.1f", selectedStickTouchScale)}x area)" else "🚶 Walk / Normal Mode enabled",
+                    "$statusStr Mode$floatStr enabled",
                     Toast.LENGTH_SHORT).show()
                 dialog.dismiss()
             }

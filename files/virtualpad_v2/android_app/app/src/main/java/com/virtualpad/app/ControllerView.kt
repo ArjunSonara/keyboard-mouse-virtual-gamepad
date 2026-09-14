@@ -182,6 +182,8 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
                 isAutoRunLocked = false
                 isStickInLockNotch = false
                 autoShiftActive = false
+                dynamicStickOriginX = null
+                dynamicStickOriginY = null
                 lookPointerId = null
                 accumDx = 0f
                 accumDy = 0f
@@ -238,6 +240,17 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
             }
             invalidate()
         }
+    var stickFloatingMode: Boolean = false
+        set(value) {
+            field = value
+            if (!value) {
+                dynamicStickOriginX = null
+                dynamicStickOriginY = null
+            }
+            invalidate()
+        }
+    var dynamicStickOriginX: Float? = null
+    var dynamicStickOriginY: Float? = null
     var stickTouchScale: Float = 1.8f
         set(value) {
             field = value.coerceIn(1.0f, 2.5f)
@@ -251,6 +264,8 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
         if (autoShiftActive) {
             setSprintActive(false)
         }
+        dynamicStickOriginX = null
+        dynamicStickOriginY = null
         visualStickX = 0f
         visualStickY = 0f
         state = state.copy(stickX = 0f, stickY = 0f)
@@ -281,6 +296,7 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
         isHapticFeedbackEnabled = true
         hudOpacity = HudConfig.getHudOpacity(context)
         stickTouchScale = HudConfig.getStickTouchScale(context)
+        stickFloatingMode = HudConfig.isStickFloatingMode(context)
         elements.addAll(HudConfig.loadLayout(context))
     }
 
@@ -331,8 +347,8 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
         textPaint.alpha = alpha255
         subTextPaint.alpha = (200 * alphaMultiplier).toInt().coerceIn(30, 255)
 
-        // Swipe zone hint
-        canvas.drawRect(W * 0.35f, 0f, W, H * 0.85f, swipeHintPaint)
+        // Swipe zone hint (50/50 clean split down the middle across full height)
+        canvas.drawRect(W * 0.50f, 0f, W, H, swipeHintPaint)
 
         // Draw edit mode overlay grid & banner
         if (isEditMode) {
@@ -367,8 +383,8 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
     }
 
     private fun drawStickElement(canvas: Canvas, el: HudElement, W: Float, H: Float) {
-        val cx = el.xPct * W
-        val cy = el.yPct * H
+        val cx = if (stickFloatingMode && !isEditMode && dynamicStickOriginX != null) dynamicStickOriginX!! else el.xPct * W
+        val cy = if (stickFloatingMode && !isEditMode && dynamicStickOriginY != null) dynamicStickOriginY!! else el.yPct * H
         val r = H * 0.16f * el.scale
 
         val notchX = cx
@@ -1215,6 +1231,13 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
                         hapticHelper.click()
                         return
                     }
+                    if (pointerZone.values.contains("stick")) {
+                        return
+                    }
+                    if (stickFloatingMode && !isEditMode) {
+                        dynamicStickOriginX = x
+                        dynamicStickOriginY = y
+                    }
                     pointerZone[id] = "stick"
                     updateStick(el, x, y)
                 }
@@ -1238,7 +1261,7 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
                     buttonTouchStart[zoneKey] = Pair(x, y)
                     buttonTouchCurrent[zoneKey] = Pair(x, y)
 
-                    if (el.swipeToAim) {
+                    if (el.swipeToAim && el.xPct >= 0.50f) {
                         buttonPointerLastX[id] = x
                         buttonPointerLastY[id] = y
                     }
@@ -1277,8 +1300,22 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
                 }
             }
         } else {
-            // Swipe look zone fallthrough (right side of screen)
-            if (lookPointerId == null && x >= width * 0.30f) {
+            // Check if touch is in left dark box empty area (left 50%) and stickFloatingMode is active!
+            if (!isEditMode && stickFloatingMode && x < width * 0.50f && !pointerZone.values.contains("stick")) {
+                val stickEl = elements.firstOrNull { it.type == ElementType.STICK }
+                if (stickEl != null) {
+                    dynamicStickOriginX = x
+                    dynamicStickOriginY = y
+                    pointerZone[id] = "stick"
+                    hapticHelper.tick()
+                    updateStick(stickEl, x, y)
+                    emitState()
+                    invalidate()
+                    return
+                }
+            }
+            // Swipe look zone fallthrough (right 50% of screen)
+            if (lookPointerId == null && x >= width * 0.50f) {
                 lookPointerId = id
                 pointerZone[id] = "look"
                 lastLookX = x
@@ -1358,11 +1395,28 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
                             buttonPointerLastX.remove(id)
                             buttonPointerLastY.remove(id)
 
-                            // Seamlessly handover to mouse look
-                            pointerZone[id] = "look"
-                            lookPointerId = id
-                            lastLookX = x
-                            lastLookY = y
+                            // Handover logic (50/50 clean split down the middle):
+                            // 1. If on RIGHT side (x >= 50% width and el.xPct >= 50%), handover to mouse look
+                            // 2. If on LEFT side (x < 50% width) and stickFloatingMode is ON, handover to floating joystick!
+                            if (el.xPct >= 0.50f && x >= width * 0.50f && lookPointerId == null) {
+                                pointerZone[id] = "look"
+                                lookPointerId = id
+                                lastLookX = x
+                                lastLookY = y
+                            } else if (stickFloatingMode && x < width * 0.50f && !pointerZone.values.contains("stick")) {
+                                val stickEl = elements.firstOrNull { it.type == ElementType.STICK }
+                                if (stickEl != null) {
+                                    dynamicStickOriginX = x
+                                    dynamicStickOriginY = y
+                                    pointerZone[id] = "stick"
+                                    hapticHelper.tick()
+                                    updateStick(stickEl, x, y)
+                                } else {
+                                    pointerZone.remove(id)
+                                }
+                            } else {
+                                pointerZone.remove(id)
+                            }
                             emitState()
                             invalidate()
                             return
@@ -1389,6 +1443,8 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
         val zone = pointerZone[id]
         when (zone) {
             "stick" -> {
+                dynamicStickOriginX = null
+                dynamicStickOriginY = null
                 if (stickSprintMode && isStickInLockNotch) {
                     // Lock auto-run forward!
                     isAutoRunLocked = true
@@ -1482,8 +1538,8 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
     }
 
     private fun updateStick(el: HudElement, x: Float, y: Float) {
-        val cx = el.xPct * width
-        val cy = el.yPct * height
+        val cx = if (stickFloatingMode && !isEditMode && dynamicStickOriginX != null) dynamicStickOriginX!! else el.xPct * width
+        val cy = if (stickFloatingMode && !isEditMode && dynamicStickOriginY != null) dynamicStickOriginY!! else el.yPct * height
         val r = height * 0.16f * el.scale
 
         val notchX = cx
