@@ -1339,8 +1339,17 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
                 handlePointerDown(event.getPointerId(i), event.getX(i), event.getY(i))
             }
             MotionEvent.ACTION_MOVE -> {
-                for (i in 0 until event.pointerCount) {
-                    handlePointerMove(event.getPointerId(i), event.getX(i), event.getY(i))
+                val historySize = event.historySize
+                val pointerCount = event.pointerCount
+                // 1. Process all intermediate micro-movements captured by the hardware digitizer between VSYNC frames
+                for (h in 0 until historySize) {
+                    for (p in 0 until pointerCount) {
+                        handlePointerMove(event.getPointerId(p), event.getHistoricalX(p, h), event.getHistoricalY(p, h))
+                    }
+                }
+                // 2. Process the latest current position for the frame
+                for (p in 0 until pointerCount) {
+                    handlePointerMove(event.getPointerId(p), event.getX(p), event.getY(p))
                 }
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP -> {
@@ -1651,8 +1660,8 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
             }
             "look" -> {
                 lookPointerId = null
-                accumDx = 0f
-                accumDy = 0f
+                // Subpixel Carry-Forward: Do NOT clear accumDx and accumDy when lifting the finger.
+                // Keeping the fractional remainder preserves fine aiming precision across discrete swipes/taps.
             }
             else -> {
                 if (zone != null) {
@@ -1827,6 +1836,18 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
         emitState()
     }
 
+    /**
+     * Subpixel mouse delta accumulation with carry-forward:
+     * - Windows and Interception mouse events only accept integer deltas (counts / mickeys).
+     * - Truncating (e.g. via .toInt()) without carry-forward would discard fractional micro-movements
+     *   (such as 0.4px per touch sample), creating a deadzone / "sticky" feel during fine aiming adjustments.
+     * - Here, we extract the integer portion (sendDx, sendDy) to transmit immediately over the wire,
+     *   and subtract that exact integer from accumDx / accumDy.
+     * - The fractional remainder (e.g. 0.4f) remains in accumDx / accumDy and is added into the next
+     *   incoming touch delta. Once accumulated fractional movements cross 1.0 (or -1.0), the next integer
+     *   step is immediately emitted.
+     * - This guarantees zero drift over time: sum(sendDx) + accumDx == sum(all historical touch deltas).
+     */
     private fun emitState() {
         val sendDx = accumDx.toInt()
         val sendDy = accumDy.toInt()

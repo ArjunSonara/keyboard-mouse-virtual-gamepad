@@ -85,6 +85,10 @@ class NetworkClient {
     private var tcpSocket: Socket? = null
     private var tcpOut: OutputStream? = null
 
+    private val socketLock = Any()
+    // Pre-allocated 13-byte buffer: 2 bytes length prefix (11) + 11 bytes PACKET_SIZE payload
+    private val usbPacketBuffer = ByteBuffer.allocate(13).order(ByteOrder.LITTLE_ENDIAN)
+
     private val sendExecutor = Executors.newSingleThreadExecutor()
     @Volatile private var targetAddress: InetAddress? = null
 
@@ -97,11 +101,15 @@ class NetworkClient {
     fun connectUsb(onError: (Exception) -> Unit = {}) {
         Thread {
             try {
-                tcpSocket?.close()
+                disconnectUsb()
                 val s = Socket("127.0.0.1", port)
                 s.tcpNoDelay = true // disable Nagle's algorithm - send immediately
-                tcpSocket = s
-                tcpOut = s.getOutputStream()
+                s.sendBufferSize = 1024 // reduce kernel socket buffer to minimize queued packet delay
+                val out = s.getOutputStream()
+                synchronized(socketLock) {
+                    tcpSocket = s
+                    tcpOut = out
+                }
                 activeKeymap?.let { sendKeymapSync(it) }
             } catch (e: Exception) {
                 onError(e)
@@ -110,10 +118,12 @@ class NetworkClient {
     }
 
     fun disconnectUsb() {
-        try { tcpOut?.close() } catch (_: Exception) {}
-        try { tcpSocket?.close() } catch (_: Exception) {}
-        tcpOut = null
-        tcpSocket = null
+        synchronized(socketLock) {
+            try { tcpOut?.close() } catch (_: Exception) {}
+            try { tcpSocket?.close() } catch (_: Exception) {}
+            tcpOut = null
+            tcpSocket = null
+        }
     }
 
     /** Call once you have host:port, e.g. from manual entry or a scanned QR. */
@@ -136,7 +146,11 @@ class NetworkClient {
             while (running.get()) {
                 try {
                     // heartbeat: resend last known buttons/stick, never replay mouse deltas
-                    sendRaw(lastSent.copy(mouseDx = 0, mouseDy = 0).toBytes())
+                    if (mode == TransportMode.USB) {
+                        writeUsbStateDirect(lastSent.copy(mouseDx = 0, mouseDy = 0))
+                    } else {
+                        sendRaw(lastSent.copy(mouseDx = 0, mouseDy = 0).toBytes())
+                    }
                     Thread.sleep(30)
                 } catch (_: InterruptedException) {
                     break
@@ -156,7 +170,31 @@ class NetworkClient {
         try { sendExecutor.shutdownNow() } catch (_: Exception) {}
     }
 
-    /** Event-driven: call this every time touch input changes. Sends immediately off-thread. */
+    /**
+     * Writes state directly to the USB TCP socket using the pre-allocated 13-byte buffer.
+     * Bypasses heap allocation and SingleThreadExecutor queue for zero latency.
+     */
+    private fun writeUsbStateDirect(state: ControllerState) {
+        val out = tcpOut ?: return
+        synchronized(socketLock) {
+            try {
+                usbPacketBuffer.clear()
+                usbPacketBuffer.putShort(PACKET_SIZE.toShort()) // 11 bytes payload
+                usbPacketBuffer.put(PACKET_MAGIC)
+                usbPacketBuffer.putInt(state.buttons)
+                usbPacketBuffer.put((state.stickX.coerceIn(-1f, 1f) * 127).toInt().toByte())
+                usbPacketBuffer.put((state.stickY.coerceIn(-1f, 1f) * 127).toInt().toByte())
+                usbPacketBuffer.putShort(state.mouseDx.coerceIn(-32000, 32000).toShort())
+                usbPacketBuffer.putShort(state.mouseDy.coerceIn(-32000, 32000).toShort())
+                out.write(usbPacketBuffer.array(), 0, 13)
+                out.flush()
+            } catch (_: Exception) {
+                // Ignore transient socket write errors
+            }
+        }
+    }
+
+    /** Event-driven: call this every time touch input changes. Sends immediately. */
     fun submit(state: ControllerState) {
         val buttonChanged = state.buttons != lastSent.buttons
         val stickChanged = state.stickX != lastSent.stickX || state.stickY != lastSent.stickY
@@ -164,17 +202,24 @@ class NetworkClient {
         val hasMouseMotion = state.mouseDx != 0 || state.mouseDy != 0
 
         if (changed || hasMouseMotion) {
-            val bytes = state.toBytes()
-            sendExecutor.execute {
-                try {
-                    sendRaw(bytes)
-                    if (buttonChanged && mode == TransportMode.WIFI) {
-                        // Multi-Touch Burst Redundancy: 2x UDP packet transmission guarantees
-                        // that simultaneous button presses arrive immediately even on lossy Wi-Fi.
+            if (mode == TransportMode.USB) {
+                // Zero-allocation direct socket streaming on touch thread:
+                // Overwrites pre-allocated 13-byte buffer in place and writes directly to socket output stream,
+                // completely bypassing SingleThreadExecutor queuing and GC allocations.
+                writeUsbStateDirect(state)
+            } else {
+                val bytes = state.toBytes()
+                sendExecutor.execute {
+                    try {
                         sendRaw(bytes)
+                        if (buttonChanged && mode == TransportMode.WIFI) {
+                            // Multi-Touch Burst Redundancy: 2x UDP packet transmission guarantees
+                            // that simultaneous button presses arrive immediately even on lossy Wi-Fi.
+                            sendRaw(bytes)
+                        }
+                    } catch (_: Exception) {
+                        // ignore - heartbeat/next event will retry
                     }
-                } catch (_: Exception) {
-                    // ignore - heartbeat/next event will retry
                 }
             }
             // mouse delta is one-shot; don't let the heartbeat replay it
@@ -252,12 +297,16 @@ class NetworkClient {
             }
             TransportMode.USB -> {
                 val out = tcpOut ?: return
-                // Frame with 2-byte little-endian length prefix for TCP
-                val framed = ByteBuffer.allocate(2 + bytes.size).order(ByteOrder.LITTLE_ENDIAN)
-                framed.putShort(bytes.size.toShort())
-                framed.put(bytes)
-                out.write(framed.array())
-                out.flush()
+                synchronized(socketLock) {
+                    try {
+                        // Frame with 2-byte little-endian length prefix for TCP
+                        val framed = ByteBuffer.allocate(2 + bytes.size).order(ByteOrder.LITTLE_ENDIAN)
+                        framed.putShort(bytes.size.toShort())
+                        framed.put(bytes)
+                        out.write(framed.array())
+                        out.flush()
+                    } catch (_: Exception) {}
+                }
             }
         }
     }

@@ -237,7 +237,6 @@ def request_key(key: str, source: str, pressed: bool):
     sources = _key_sources.setdefault(key, set())
     if pressed:
         if source in sources:
-            # This source is already holding the key (e.g. stick moving while already tilted).
             # Maintain the hold continuously without spamming pulses!
             return
         was_already_held = len(sources) > 0
