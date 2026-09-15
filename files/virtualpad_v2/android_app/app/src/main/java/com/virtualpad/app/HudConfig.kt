@@ -462,7 +462,8 @@ object HudConfig {
     enum class ClawStyle(val id: Int, val displayName: String) {
         TWO_FINGER(2, "2-Finger (Thumbs)"),
         THREE_FINGER(3, "3-Finger Claw"),
-        FOUR_FINGER(4, "4-Finger Claw")
+        FOUR_FINGER(4, "4-Finger Claw"),
+        CONTROLLER(5, "Controller Panel")
     }
 
     enum class BindingRole {
@@ -1146,6 +1147,24 @@ object HudConfig {
                 BindingRole.EXTRA_2 -> CoordsResult(0.91f, 0.87f, 0.95f, ButtonShape.CIRCLE, false)
                 BindingRole.EXTRA_3 -> CoordsResult(0.63f, 0.87f, 0.90f, ButtonShape.CIRCLE, false)
             }
+            ClawStyle.CONTROLLER -> when (role) {
+                BindingRole.PRIMARY_TRIGGER -> CoordsResult(0.77f, 0.11f, 1.0f, ButtonShape.ROUNDED_RECT, true)
+                BindingRole.SECONDARY_TRIGGER -> CoordsResult(0.23f, 0.11f, 1.0f, ButtonShape.ROUNDED_RECT, true)
+                BindingRole.ABILITY_1 -> CoordsResult(0.10f, 0.11f, 1.0f, ButtonShape.ROUNDED_RECT, false)
+                BindingRole.ABILITY_2 -> CoordsResult(0.90f, 0.11f, 1.0f, ButtonShape.ROUNDED_RECT, false)
+                BindingRole.JUMP -> CoordsResult(0.805f, 0.60f, 1.0f, ButtonShape.CIRCLE, false)
+                BindingRole.SPRINT -> CoordsResult(0.87f, 0.71f, 1.0f, ButtonShape.CIRCLE, false)
+                BindingRole.INTERACT -> CoordsResult(0.87f, 0.49f, 1.0f, ButtonShape.CIRCLE, false)
+                BindingRole.RELOAD -> CoordsResult(0.935f, 0.60f, 1.0f, ButtonShape.CIRCLE, false)
+                BindingRole.CROUCH -> CoordsResult(0.13f, 0.88f, 1.0f, ButtonShape.CIRCLE, false)
+                BindingRole.ABILITY_3 -> CoordsResult(0.87f, 0.88f, 1.0f, ButtonShape.CIRCLE, false)
+                BindingRole.WHEEL_MENU -> CoordsResult(0.32f, 0.48f, 1.0f, ButtonShape.ROUNDED_RECT, false)
+                BindingRole.MAP_MENU -> CoordsResult(0.55f, 0.93f, 1.0f, ButtonShape.ROUNDED_RECT, false)
+                BindingRole.ABILITY_4 -> CoordsResult(0.73f, 0.49f, 0.95f, ButtonShape.CIRCLE, false)
+                BindingRole.EXTRA_1 -> CoordsResult(0.73f, 0.71f, 0.95f, ButtonShape.CIRCLE, false)
+                BindingRole.EXTRA_2 -> CoordsResult(0.64f, 0.11f, 0.95f, ButtonShape.ROUNDED_RECT, false)
+                BindingRole.EXTRA_3 -> CoordsResult(0.36f, 0.11f, 0.95f, ButtonShape.ROUNDED_RECT, false)
+            }
         }
     }
 
@@ -1157,11 +1176,136 @@ object HudConfig {
         val swipe: Boolean
     )
 
+    private data class ControllerBtnInfo(val id: String, val label: String, val isCustom: Boolean, val customSlot: Int)
+
     fun generateGameLayout(preset: GamePreset, claw: ClawStyle): List<HudElement> {
         val list = mutableListOf<HudElement>()
         var z = 1
 
-        // Left Stick (Floating / Dynamic Mode on left 50% remains identical across all games)
+        if (claw == ClawStyle.CONTROLLER) {
+            // 1. Left Movement Stick & Circular D-Pad (matching reference layout)
+            list.add(
+                HudElement(
+                    id = "leftstick",
+                    label = "STICK",
+                    key = "",
+                    type = ElementType.STICK,
+                    xPct = 0.13f,
+                    yPct = 0.62f,
+                    scale = 1.0f,
+                    zOrder = z++
+                )
+            )
+
+            val upK = preset.bindings.firstOrNull { it.key == "up" || it.key == "1" || it.role == BindingRole.EXTRA_1 }?.key ?: "h"
+            val downK = preset.bindings.firstOrNull { it.key == "down" || it.key == "2" || it.role == BindingRole.EXTRA_2 }?.key ?: "t"
+            val leftK = preset.bindings.firstOrNull { it.key == "left" || it.key == "3" || it.role == BindingRole.EXTRA_3 }?.key ?: "x"
+            val rightK = preset.bindings.firstOrNull { it.key == "right" || it.key == "4" }?.key ?: "x"
+
+            list.add(
+                HudElement(
+                    id = "dpad",
+                    label = "D-PAD",
+                    key = "",
+                    type = ElementType.DPAD,
+                    xPct = 0.32f,
+                    yPct = 0.72f,
+                    scale = 1.0f,
+                    zOrder = z++,
+                    dpadUpKey = upK,
+                    dpadDownKey = downK,
+                    dpadLeftKey = leftK,
+                    dpadRightKey = rightK
+                )
+            )
+
+            // 2. Mouse Scroll Wheel Strip (Right Edge)
+            list.add(
+                HudElement(
+                    id = "scroll_wheel",
+                    label = "WHEEL",
+                    key = "mouse_wheel",
+                    type = ElementType.SCROLL_WHEEL,
+                    xPct = 0.96f,
+                    yPct = 0.45f,
+                    scale = 1.0f,
+                    zOrder = z++,
+                    shape = ButtonShape.ROUNDED_RECT
+                )
+            )
+
+            // 3. System ESC Button (Bottom Center Left)
+            list.add(
+                HudElement(
+                    id = "small_icon",
+                    label = "ESC",
+                    key = "esc",
+                    type = ElementType.BUTTON,
+                    xPct = 0.45f,
+                    yPct = 0.93f,
+                    scale = 1.0f,
+                    zOrder = z++,
+                    shape = ButtonShape.ROUNDED_RECT
+                )
+            )
+
+            // 4. Map game bindings to controller buttons and extra slots
+            var customSlotIdx = 0
+            for (b in preset.bindings) {
+                val info = when (b.role) {
+                    BindingRole.PRIMARY_TRIGGER -> ControllerBtnInfo("rt", "RT", false, -1)
+                    BindingRole.SECONDARY_TRIGGER -> ControllerBtnInfo("lt", "LT", false, -1)
+                    BindingRole.ABILITY_1 -> ControllerBtnInfo("lb", "LB", false, -1)
+                    BindingRole.ABILITY_2 -> ControllerBtnInfo("rb", "RB", false, -1)
+                    BindingRole.JUMP -> ControllerBtnInfo("x", "X", false, -1)
+                    BindingRole.SPRINT -> ControllerBtnInfo("a", "A", false, -1)
+                    BindingRole.INTERACT -> ControllerBtnInfo("y", "Y", false, -1)
+                    BindingRole.RELOAD -> ControllerBtnInfo("b", "B", false, -1)
+                    BindingRole.CROUCH -> ControllerBtnInfo("lsb", "LSB", false, -1)
+                    BindingRole.ABILITY_3 -> ControllerBtnInfo("rsb", "RSB", false, -1)
+                    BindingRole.MAP_MENU -> ControllerBtnInfo("hamburger_icon", "B", false, -1)
+                    else -> {
+                        val slot = customSlotIdx++
+                        ControllerBtnInfo("custom_$slot", b.action, true, slot)
+                    }
+                }
+
+                val res = getCoordsForRole(b.role, claw)
+                val isRect = b.role in listOf(
+                    BindingRole.PRIMARY_TRIGGER,
+                    BindingRole.SECONDARY_TRIGGER,
+                    BindingRole.ABILITY_1,
+                    BindingRole.ABILITY_2,
+                    BindingRole.MAP_MENU,
+                    BindingRole.WHEEL_MENU,
+                    BindingRole.EXTRA_2,
+                    BindingRole.EXTRA_3
+                )
+                val finalShape = if (isRect) ButtonShape.ROUNDED_RECT else if (b.shape != ButtonShape.CIRCLE) b.shape else res.shape
+                val finalSwipe = b.swipeToAim || res.swipe
+
+                list.add(
+                    HudElement(
+                        id = info.id,
+                        label = info.label,
+                        key = b.key,
+                        type = ElementType.BUTTON,
+                        xPct = res.x,
+                        yPct = res.y,
+                        scale = res.scale,
+                        isCustom = info.isCustom,
+                        customSlot = info.customSlot,
+                        zOrder = z++,
+                        shape = finalShape,
+                        swipeToAim = finalSwipe
+                    )
+                )
+            }
+
+            return list
+        }
+
+        // Left Stick (Floating / Dynamic Mode on left 50% for 2, 3, 4 finger claw)
         list.add(
             HudElement(
                 id = "leftstick",
@@ -1243,6 +1387,7 @@ object HudConfig {
         val preset = findGamePresetForProfile(profile)
         if (preset != null) {
             val claw = when {
+                profile.contains("Controller", ignoreCase = true) -> ClawStyle.CONTROLLER
                 profile.contains("4-Finger", ignoreCase = true) -> ClawStyle.FOUR_FINGER
                 profile.contains("3-Finger", ignoreCase = true) -> ClawStyle.THREE_FINGER
                 else -> ClawStyle.TWO_FINGER

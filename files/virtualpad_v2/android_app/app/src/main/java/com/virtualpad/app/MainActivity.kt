@@ -899,7 +899,8 @@ class MainActivity : Activity(), SensorEventListener {
         val clawStyles = listOf(
             HudConfig.ClawStyle.TWO_FINGER,
             HudConfig.ClawStyle.THREE_FINGER,
-            HudConfig.ClawStyle.FOUR_FINGER
+            HudConfig.ClawStyle.FOUR_FINGER,
+            HudConfig.ClawStyle.CONTROLLER
         )
 
         val clawDescView = TextView(this).apply {
@@ -926,6 +927,7 @@ class MainActivity : Activity(), SensorEventListener {
                 HudConfig.ClawStyle.TWO_FINGER -> "✌️ 2-Finger: Standard thumb controls. Action buttons clustered on right thumb."
                 HudConfig.ClawStyle.THREE_FINGER -> "🤟 3-Finger: Right index on top trigger/aim, right thumb on actions."
                 HudConfig.ClawStyle.FOUR_FINGER -> "🖐️ 4-Finger: Left & right index on upper bumpers/triggers for instant response."
+                HudConfig.ClawStyle.CONTROLLER -> "🎮 Controller Panel: Authentic Gamepad layout with D-Pad, LSB/RSB, triggers & ABXY diamond."
             }
         }
 
@@ -934,10 +936,11 @@ class MainActivity : Activity(), SensorEventListener {
                 text = when (style) {
                     HudConfig.ClawStyle.TWO_FINGER -> "✌️ 2-Finger"
                     HudConfig.ClawStyle.THREE_FINGER -> "🤟 3-Finger"
-                    HudConfig.ClawStyle.FOUR_FINGER -> "🖐️ 4-Finger Claw"
+                    HudConfig.ClawStyle.FOUR_FINGER -> "🖐️ 4-Finger"
+                    HudConfig.ClawStyle.CONTROLLER -> "🎮 Controller"
                 }
-                textSize = 11f
-                setPadding(10, 6, 10, 6)
+                textSize = 10f
+                setPadding(6, 6, 6, 6)
                 setOnClickListener {
                     selectedClaw = style
                     updateClawButtonStyles()
@@ -945,7 +948,7 @@ class MainActivity : Activity(), SensorEventListener {
             }
             clawButtons.add(btn)
             clawRow.addView(btn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
-                marginEnd = if (style != HudConfig.ClawStyle.FOUR_FINGER) 8 else 0
+                marginEnd = if (style != HudConfig.ClawStyle.CONTROLLER) 6 else 0
             })
         }
         updateClawButtonStyles()
