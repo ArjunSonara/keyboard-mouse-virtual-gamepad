@@ -260,7 +260,8 @@ data class HudElement(
     var maxDragDistance: Float = 0.8f,
     var userExplicitDragDist: Boolean = false,
     var isInstantTap: Boolean = false,
-    var instantTapDurationMs: Int = 15
+    var instantTapDurationMs: Int = 15,
+    var isEnabled: Boolean = true
 ) {
     fun toJson(): JSONObject {
         val obj = JSONObject()
@@ -276,6 +277,7 @@ data class HudElement(
         obj.put("zOrder", zOrder)
         obj.put("shape", shape.name)
         obj.put("rotation", rotation.toDouble())
+        obj.put("isEnabled", isEnabled)
         if (type == ElementType.DPAD) {
             obj.put("dpadUpKey", dpadUpKey)
             obj.put("dpadDownKey", dpadDownKey)
@@ -329,6 +331,7 @@ data class HudElement(
             val userExplicitDragDist = hasExplicitDrag
             val isInstantTap = obj.optBoolean("isInstantTap", false)
             val instantTapDurationMs = obj.optInt("instantTapDurationMs", 15)
+            val isEnabled = obj.optBoolean("isEnabled", true)
             return HudElement(
                 id = idStr,
                 label = obj.optString("label", ""),
@@ -358,7 +361,8 @@ data class HudElement(
                 maxDragDistance = maxDragDistance,
                 userExplicitDragDist = userExplicitDragDist,
                 isInstantTap = isInstantTap,
-                instantTapDurationMs = instantTapDurationMs
+                instantTapDurationMs = instantTapDurationMs,
+                isEnabled = isEnabled
             )
         }
     }
@@ -455,7 +459,7 @@ object HudConfig {
         return list
     }
 
-    private fun getBaseElementsForProfile(profile: String): List<HudElement> {
+    fun getBaseElementsForProfile(profile: String): List<HudElement> {
         return if (profile == "Default 2") getDefault2Elements() else getDefaultElements()
     }
 
@@ -723,6 +727,17 @@ object HudConfig {
 
     fun setGyroAxisMode(context: Context, mode: Int) {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit().putInt(KEY_GYRO_AXIS_MODE, mode).apply()
+    }
+
+    // Touch Optimization / Multi-Touch Booster
+    private const val KEY_TOUCH_OPTIMIZATION_ENABLED = "touch_optimization_enabled"
+
+    fun isTouchOptimizationEnabled(context: Context): Boolean {
+        return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getBoolean(KEY_TOUCH_OPTIMIZATION_ENABLED, true)
+    }
+
+    fun setTouchOptimizationEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit().putBoolean(KEY_TOUCH_OPTIMIZATION_ENABLED, enabled).apply()
     }
 
     /**

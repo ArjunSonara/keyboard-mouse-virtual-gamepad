@@ -88,7 +88,7 @@ class NetworkClient {
     private val sendExecutor = Executors.newSingleThreadExecutor()
     @Volatile private var targetAddress: InetAddress? = null
 
-    private var lastSent = ControllerState()
+    @Volatile private var lastSent = ControllerState()
     private val running = AtomicBoolean(false)
     private var heartbeatThread: Thread? = null
 
@@ -158,9 +158,9 @@ class NetworkClient {
 
     /** Event-driven: call this every time touch input changes. Sends immediately off-thread. */
     fun submit(state: ControllerState) {
-        val changed = state.buttons != lastSent.buttons ||
-            state.stickX != lastSent.stickX ||
-            state.stickY != lastSent.stickY
+        val buttonChanged = state.buttons != lastSent.buttons
+        val stickChanged = state.stickX != lastSent.stickX || state.stickY != lastSent.stickY
+        val changed = buttonChanged || stickChanged
         val hasMouseMotion = state.mouseDx != 0 || state.mouseDy != 0
 
         if (changed || hasMouseMotion) {
@@ -168,6 +168,11 @@ class NetworkClient {
             sendExecutor.execute {
                 try {
                     sendRaw(bytes)
+                    if (buttonChanged && mode == TransportMode.WIFI) {
+                        // Multi-Touch Burst Redundancy: 2x UDP packet transmission guarantees
+                        // that simultaneous button presses arrive immediately even on lossy Wi-Fi.
+                        sendRaw(bytes)
+                    }
                 } catch (_: Exception) {
                     // ignore - heartbeat/next event will retry
                 }

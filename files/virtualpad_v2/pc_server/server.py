@@ -82,8 +82,8 @@ BUTTON_ORDER = [
 BUTTON_KEYMAP = {
     "lb": "tab",
     "rb": "q",
-    "lt": "[",
-    "rt": ";",
+    "lt": "mouse_right",
+    "rt": "mouse_left",
     "y": "e",
     "x": "space",
     "b": "r",
@@ -266,13 +266,61 @@ def _actually_set_key(key: str, should_hold: bool):
                 _held_ctx.pop(key, None)
 
 
+_pulse_generations = {}
+
+
+def _pulse_key(key: str):
+    """
+    Pulses a key or mouse button: releases it for ~35ms, then presses it back down
+    so that games and emulators register a fresh click/keystroke even if another button
+    (like Right Fire / swipe-aim) is already holding the same key.
+    Uses generation counters to avoid race conditions when rapidly tapping.
+    """
+    gen = _pulse_generations.get(key, 0) + 1
+    _pulse_generations[key] = gen
+
+    def _do_pulse(my_gen):
+        # 1. Send clean release so the game / emulator registers the UP transition
+        with _state_lock:
+            _actually_set_key(key, False)
+
+        # 35ms sleep guarantees at least 2 complete frame ticks at 60Hz (16.6ms/frame)
+        time.sleep(0.035)
+
+        with _state_lock:
+            # Only re-engage hold if this pulse is still the newest one and sources still want this key held
+            if _pulse_generations.get(key) == my_gen:
+                if len(_key_sources.get(key, set())) > 0:
+                    _actually_set_key(key, True)
+
+    threading.Thread(target=_do_pulse, args=(gen,), daemon=True).start()
+
+
 def request_key(key: str, source: str, pressed: bool):
     sources = _key_sources.setdefault(key, set())
     if pressed:
+        if source in sources:
+            # This source is already holding the key (e.g. stick moving while already tilted).
+            # Maintain the hold continuously without spamming pulses!
+            return
+        was_already_held = len(sources) > 0
         sources.add(source)
+        if was_already_held:
+            # Multi-Source Trigger: A DIFFERENT button was pressed while another button is already holding this key!
+            # (e.g. Left Fire tapped while Right Fire is holding mouse_left to aim/swipe).
+            # Pulse the key/mouse button so Windows and the game register a fresh click/down event.
+            _pulse_key(key)
+        else:
+            _actually_set_key(key, True)
     else:
+        if source not in sources:
+            # This source wasn't holding the key anyway.
+            return
         sources.discard(source)
-    _actually_set_key(key, len(sources) > 0)
+        # When a source is released:
+        # If other sources are still holding this key (e.g. right thumb still on screen),
+        # keep the hold active without causing an unwanted second pulse/release glitch!
+        _actually_set_key(key, len(sources) > 0)
 
 
 def release_everything():

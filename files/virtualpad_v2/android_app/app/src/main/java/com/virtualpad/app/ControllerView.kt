@@ -115,6 +115,17 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
         textAlign = Paint.Align.CENTER
         isAntiAlias = true
     }
+    private val disabledOutlinePaint = Paint().apply {
+        color = Color.parseColor("#E53935")
+        style = Paint.Style.STROKE
+        strokeWidth = 3.5f
+        pathEffect = DashPathEffect(floatArrayOf(8f, 6f), 0f)
+        isAntiAlias = true
+    }
+    private val disabledFillPaint = Paint().apply {
+        color = Color.parseColor("#351515")
+        isAntiAlias = true
+    }
     private val macroGlowPaint = Paint().apply {
         color = Color.parseColor("#E040FB")
         style = Paint.Style.STROKE
@@ -262,6 +273,13 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
             field = value.coerceIn(1.0f, 2.5f)
             invalidate()
         }
+
+    // Touch Optimization / Multi-Touch Booster
+    var isTouchOptimizationEnabled: Boolean = true
+        set(value) {
+            field = value
+            invalidate()
+        }
     var onOpenStickSettingsRequested: ((HudElement) -> Unit)? = null
 
     fun resetSprint() {
@@ -364,6 +382,7 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
         // Draw elements in ascending zOrder (higher zOrder drawn on top)
         val sortedList = elements.sortedBy { it.zOrder }
         for (el in sortedList) {
+            if (!isEditMode && !el.isEnabled) continue
             when (el.type) {
                 ElementType.STICK -> drawStickElement(canvas, el, W, H)
                 ElementType.DPAD -> drawDpadElement(canvas, el, W, H)
@@ -423,8 +442,10 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
         }
 
         // Main stick base circle
-        canvas.drawCircle(cx, cy, r, fillPaint)
-        canvas.drawCircle(cx, cy, r, outlinePaint)
+        val currentFill = if (isEditMode && !el.isEnabled) disabledFillPaint else fillPaint
+        val currentOutline = if (isEditMode && !el.isEnabled) disabledOutlinePaint else outlinePaint
+        canvas.drawCircle(cx, cy, r, currentFill)
+        canvas.drawCircle(cx, cy, r, currentOutline)
 
         // Thumb stick head
         val headX = when {
@@ -437,8 +458,13 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
             !isEditMode -> cy + visualStickY * r * 0.5f
             else -> cy
         }
-        canvas.drawCircle(headX, headY, r * 0.45f, if (isAutoRunLocked && stickSprintMode) customFillActivePaint else fillActivePaint)
-        if (isAutoRunLocked && stickSprintMode) {
+        val headFill = when {
+            isEditMode && !el.isEnabled -> disabledFillPaint
+            isAutoRunLocked && stickSprintMode -> customFillActivePaint
+            else -> fillActivePaint
+        }
+        canvas.drawCircle(headX, headY, r * 0.45f, headFill)
+        if (isAutoRunLocked && stickSprintMode && el.isEnabled) {
             canvas.drawCircle(headX, headY, r * 0.45f + 2f, toggleLatchedPaint)
         }
 
@@ -452,8 +478,14 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
 
         // Mode indicator below label
         subTextPaint.textSize = min(W, H) * 0.018f * el.scale
-        val modeLabel = if (stickSprintMode) "⚡ Sprint" else "🚶 Normal"
-        canvas.drawText(modeLabel, cx, cy + r * 1.05f, subTextPaint)
+        if (isEditMode && !el.isEnabled) {
+            badgePaint.textSize = min(W, H) * 0.020f * el.scale
+            badgePaint.color = Color.parseColor("#FF5252")
+            canvas.drawText("🚫 OFF", cx, cy + r * 1.05f, badgePaint)
+        } else {
+            val modeLabel = if (stickSprintMode) "⚡ Sprint" else "🚶 Normal"
+            canvas.drawText(modeLabel, cx, cy + r * 1.05f, subTextPaint)
+        }
 
         // In Edit Mode: Draw mini gear ⚙ icon badge at bottom-right of the stick
         if (isEditMode) {
@@ -486,8 +518,10 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
         val cy = el.yPct * H
         val r = H * 0.14f * el.scale
 
-        canvas.drawCircle(cx, cy, r, fillPaint)
-        canvas.drawCircle(cx, cy, r, outlinePaint)
+        val currentFill = if (isEditMode && !el.isEnabled) disabledFillPaint else fillPaint
+        val currentOutline = if (isEditMode && !el.isEnabled) disabledOutlinePaint else outlinePaint
+        canvas.drawCircle(cx, cy, r, currentFill)
+        canvas.drawCircle(cx, cy, r, currentOutline)
 
         textPaint.textSize = min(W, H) * 0.030f * el.scale
         // Draw directional keys on each quadrant!
@@ -496,8 +530,14 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
         canvas.drawText(formatKeyDisplay(el.dpadLeftKey), cx - r * 0.6f, cy + 10f, textPaint)
         canvas.drawText(formatKeyDisplay(el.dpadRightKey), cx + r * 0.6f, cy + 10f, textPaint)
 
-        subTextPaint.textSize = min(W, H) * 0.020f * el.scale
-        canvas.drawText("D-PAD", cx, cy + 8f, subTextPaint)
+        if (isEditMode && !el.isEnabled) {
+            badgePaint.textSize = min(W, H) * 0.020f * el.scale
+            badgePaint.color = Color.parseColor("#FF5252")
+            canvas.drawText("🚫 OFF", cx, cy + 8f, badgePaint)
+        } else {
+            subTextPaint.textSize = min(W, H) * 0.020f * el.scale
+            canvas.drawText("D-PAD", cx, cy + 8f, subTextPaint)
+        }
     }
 
     private fun drawButtonElement(canvas: Canvas, el: HudElement, W: Float, H: Float) {
@@ -583,12 +623,17 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
         val isMacroActive = activeMacroButtons.contains(el.id)
 
         val currentFill = when {
+            isEditMode && !el.isEnabled -> disabledFillPaint
             el.isCustom && active -> customFillActivePaint
             el.isCustom -> customFillPaint
             active -> fillActivePaint
             else -> fillPaint
         }
-        val currentOutline = if (el.isCustom) customOutlinePaint else outlinePaint
+        val currentOutline = when {
+            isEditMode && !el.isEnabled -> disabledOutlinePaint
+            el.isCustom -> customOutlinePaint
+            else -> outlinePaint
+        }
 
         when (el.shape) {
             ButtonShape.CIRCLE -> {
@@ -648,22 +693,40 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
     }
 
     private fun drawButtonLabels(canvas: Canvas, el: HudElement, cx: Float, cy: Float, W: Float, H: Float) {
-        textPaint.textSize = min(W, H) * 0.030f * el.scale
-        subTextPaint.textSize = min(W, H) * 0.020f * el.scale
+        val r = getButtonRadius(el, H)
 
-        if (el.isCustom) {
-            val mainLabel = el.label.ifEmpty { "C${el.customSlot + 1}" }
-            canvas.drawText(mainLabel, cx, cy - 2f, textPaint)
-            if (el.key.isNotEmpty()) {
-                val keyText = formatKeyDisplay(el.key)
-                canvas.drawText("[$keyText]", cx, cy + 22f * el.scale, subTextPaint)
+        val rawLabel = el.label.trim()
+        val mainLabel = when {
+            rawLabel.isNotEmpty() -> {
+                if (rawLabel.contains(" (") && rawLabel.endsWith(")")) {
+                    rawLabel.substringBefore(" (").trim()
+                } else {
+                    rawLabel
+                }
             }
+            el.isCustom -> "C${el.customSlot + 1}"
+            else -> el.id.uppercase()
+        }
+
+        if (el.key.isNotEmpty()) {
+            textPaint.textSize = min(W, H) * 0.026f * el.scale
+            subTextPaint.textSize = min(W, H) * 0.018f * el.scale
+            val keyText = formatKeyDisplay(el.key)
+            canvas.drawText(mainLabel, cx, cy - 3f * el.scale, textPaint)
+            canvas.drawText("[$keyText]", cx, cy + 18f * el.scale, subTextPaint)
         } else {
-            canvas.drawText(el.label, cx, cy + 10f, textPaint)
+            textPaint.textSize = min(W, H) * 0.030f * el.scale
+            canvas.drawText(mainLabel, cx, cy + 10f * el.scale, textPaint)
+        }
+
+        // In Edit Mode, if disabled, draw prominent OFF badge
+        if (isEditMode && !el.isEnabled) {
+            badgePaint.textSize = min(W, H) * 0.019f * el.scale
+            badgePaint.color = Color.parseColor("#FF5252")
+            canvas.drawText("🚫 OFF", cx, cy - r * 0.55f, badgePaint)
         }
 
         // Visual badge indicators (⚡M for Macro, 🔒 for Toggle, ⚡ for Turbo, 🎯 for Swipe Aim)
-        val r = getButtonRadius(el, H)
         if (el.swipeToAim) {
             badgePaint.textSize = min(W, H) * 0.019f * el.scale
             badgePaint.color = Color.parseColor("#58A6FF")
@@ -707,8 +770,16 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
         val rect = getScrollWheelRect(el, cx, cy, W, H)
         val isActive = pointerZone.values.contains("scroll_wheel")
 
-        val currentFill = if (isActive) fillActivePaint else fillPaint
-        val currentOutline = if (isActive) turboGlowPaint else outlinePaint
+        val currentFill = when {
+            isEditMode && !el.isEnabled -> disabledFillPaint
+            isActive -> fillActivePaint
+            else -> fillPaint
+        }
+        val currentOutline = when {
+            isEditMode && !el.isEnabled -> disabledOutlinePaint
+            isActive -> turboGlowPaint
+            else -> outlinePaint
+        }
 
         // Background pill
         canvas.drawRoundRect(rect, 20f, 20f, currentFill)
@@ -746,7 +817,13 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
             isAntiAlias = true
         }
         canvas.drawText("MMB", cx, cy - 24f * el.scale, mmbPaint)
-        canvas.drawText("WHEEL", cx, cy + rect.height() * 0.62f, subTextPaint)
+        if (isEditMode && !el.isEnabled) {
+            badgePaint.textSize = min(W, H) * 0.016f * el.scale
+            badgePaint.color = Color.parseColor("#FF5252")
+            canvas.drawText("🚫 OFF", cx, cy + rect.height() * 0.62f, badgePaint)
+        } else {
+            canvas.drawText("WHEEL", cx, cy + rect.height() * 0.62f, subTextPaint)
+        }
     }
 
     private fun drawSelectionHighlight(canvas: Canvas, el: HudElement, W: Float, H: Float) {
@@ -880,7 +957,7 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
 
     private fun startInstantTap(zoneKey: String, durationMs: Int) {
         stopInstantTap(zoneKey)
-        val safeDuration = durationMs.coerceIn(5, 500).toLong()
+        val safeDuration = durationMs.coerceIn(30, 500).toLong()
 
         instantTapPulseState[zoneKey] = true
         setButtonState(zoneKey, true)
@@ -968,10 +1045,12 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
         val sortedList = elements.sortedByDescending { it.zOrder }
 
         // --- PASS 1: Exact Hit Testing ---
+        var exactMatch: HudElement? = null
         for (el in sortedList) {
+            if (!isEditMode && !el.isEnabled) continue
             val cx = el.xPct * W
             val cy = el.yPct * H
-            when (el.type) {
+            val isExactHit = when (el.type) {
                 ElementType.STICK -> {
                     val r = H * 0.16f * el.scale
                     val notchX = cx
@@ -979,15 +1058,15 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
                     val notchR = r * 0.38f
                     val hitMain = hypot(x - cx, y - cy) <= r
                     val hitNotch = stickSprintMode && hypot(x - notchX, y - notchY) <= notchR * 1.6f
-                    if (hitMain || hitNotch) return el
+                    hitMain || hitNotch
                 }
                 ElementType.DPAD -> {
                     val r = H * 0.14f * el.scale
-                    if (hypot(x - cx, y - cy) <= r) return el
+                    hypot(x - cx, y - cy) <= r
                 }
                 ElementType.SCROLL_WHEEL -> {
                     val rect = getScrollWheelRect(el, cx, cy, W, H)
-                    if (rect.contains(x, y)) return el
+                    rect.contains(x, y)
                 }
                 ElementType.BUTTON -> {
                     val (testX, testY) = if (el.rotation != 0f) {
@@ -1003,20 +1082,31 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
                     when (el.shape) {
                         ButtonShape.CIRCLE -> {
                             val r = getButtonRadius(el, H)
-                            if (hypot(testX - cx, testY - cy) <= r) return el
+                            hypot(testX - cx, testY - cy) <= r
                         }
                         ButtonShape.SQUARE -> {
                             val rect = getButtonSquare(el, cx, cy, H)
-                            if (rect.contains(testX, testY)) return el
+                            rect.contains(testX, testY)
                         }
                         ButtonShape.ROUNDED_RECT -> {
                             val rect = getButtonRect(el, cx, cy, W, H)
-                            if (rect.contains(testX, testY)) return el
+                            rect.contains(testX, testY)
                         }
                     }
                 }
             }
+            if (isExactHit) {
+                if (isEditMode) return el
+                val isHeld = pointerZone.values.contains(getZoneKey(el))
+                if (!isHeld) {
+                    // Multi-Touch De-confliction: Prioritize unheld button so adjacent simultaneous touches never fight
+                    return el
+                } else if (exactMatch == null) {
+                    exactMatch = el
+                }
+            }
         }
+        if (exactMatch != null) return exactMatch
 
         // In Edit Mode, only exact hits count (so dragging and positioning elements is pixel-precise)
         if (isEditMode) return null
@@ -1026,11 +1116,18 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
         var bestDistance = Float.MAX_VALUE
 
         for (el in sortedList) {
+            if (!isEditMode && !el.isEnabled) continue
             val cx = el.xPct * W
             val cy = el.yPct * H
             when (el.type) {
                 ElementType.BUTTON -> {
-                    if (el.touchPadding > 1.0f) {
+                    // When Touch Optimization is enabled, ensure a minimum 35% proximity margin
+                    val effectivePadding = if (isTouchOptimizationEnabled) {
+                        el.touchPadding.coerceAtLeast(1.35f)
+                    } else {
+                        el.touchPadding
+                    }
+                    if (effectivePadding > 1.0f) {
                         val (testX, testY) = if (el.rotation != 0f) {
                             val rad = Math.toRadians(-el.rotation.toDouble())
                             val cos = Math.cos(rad).toFloat()
@@ -1042,12 +1139,14 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
                             Pair(x, y)
                         }
                         val r = getButtonRadius(el, H)
-                        val expandedR = r * el.touchPadding
+                        val expandedR = r * effectivePadding
                         val dist = hypot(testX - cx, testY - cy)
                         if (dist <= expandedR) {
-                            val distFromEdge = dist - r
-                            if (distFromEdge < bestDistance) {
-                                bestDistance = distFromEdge
+                            val isHeld = pointerZone.values.contains(getZoneKey(el))
+                            // Prioritize unheld elements so simultaneous multi-finger touches don't duplicate
+                            val priorityDist = (dist - r) + (if (isHeld) 500f else 0f)
+                            if (priorityDist < bestDistance) {
+                                bestDistance = priorityDist
                                 bestElement = el
                             }
                         }
@@ -1431,7 +1530,8 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
                     if (el != null && !el.swipeToAim && !isEditMode) {
                         // For buttons with Swipe-to-Aim OFF (e.g. Reload, Jump, Crouch):
                         // As soon as thumb swipes off the button's area, release click and transition to mouse look!
-                        val isInside = isPointInsideButton(el, x, y, paddingMultiplier = 1.15f)
+                        val cushionMultiplier = if (isTouchOptimizationEnabled) 1.85f else 1.15f
+                        val isInside = isPointInsideButton(el, x, y, paddingMultiplier = cushionMultiplier)
                         if (!isInside) {
                             if (isRecordingMacro) {
                                 val keyName = el.key.ifEmpty { el.id }
@@ -1444,7 +1544,10 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
                                 stopInstantTap(zone)
                             }
                             if (!el.isToggle || !latchedButtons.contains(zone)) {
-                                setButtonState(zone, false)
+                                val otherPointersHolding = pointerZone.filter { it.key != id && it.value == zone }
+                                if (otherPointersHolding.isEmpty()) {
+                                    setButtonState(zone, false)
+                                }
                             }
                             buttonTouchStart.remove(zone)
                             buttonTouchCurrent.remove(zone)
@@ -1569,14 +1672,21 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
                         // Latched in Toggle mode - stay ON!
                         setButtonState(zone, true)
                     } else {
-                        setButtonState(zone, false)
+                        // Multi-Touch Reference Counting: only release button if no OTHER active finger is still holding this button!
+                        val otherPointersHolding = pointerZone.filter { it.key != id && it.value == zone }
+                        if (otherPointersHolding.isEmpty()) {
+                            setButtonState(zone, false)
+                        }
                     }
                 }
             }
         }
         if (zone != null) {
-            buttonTouchStart.remove(zone)
-            buttonTouchCurrent.remove(zone)
+            val otherPointersHolding = pointerZone.filter { it.key != id && it.value == zone }
+            if (otherPointersHolding.isEmpty()) {
+                buttonTouchStart.remove(zone)
+                buttonTouchCurrent.remove(zone)
+            }
         }
         buttonPointerLastX.remove(id)
         buttonPointerLastY.remove(id)
@@ -1726,6 +1836,29 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
         onStateChanged?.invoke(out)
     }
 
+    /**
+     * Resets and flushes all active touch pointers, button hold states, and buffers.
+     * Called during Touch Optimization to ensure a completely clean input state.
+     */
+    fun resetTouchPointers() {
+        pointerZone.clear()
+        buttonPointerLastX.clear()
+        buttonPointerLastY.clear()
+        buttonTouchStart.clear()
+        buttonTouchCurrent.clear()
+        stopAllTurbo()
+        stopAllInstantTap()
+        isAutoRunLocked = false
+        isStickInLockNotch = false
+        autoShiftActive = false
+        lookPointerId = null
+        accumDx = 0f
+        accumDy = 0f
+        state = ControllerState()
+        emitState()
+        invalidate()
+    }
+
     // -------------------------------------------------------------------
     // HUD Customizer API (Called by MainActivity Editor Overlay)
     // -------------------------------------------------------------------
@@ -1829,11 +1962,37 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
 
     fun deleteSelectedElement(): Boolean {
         val current = selectedElement ?: return false
-        if (!current.isCustom) return false
-
         elements.remove(current)
         selectedElement = null
         onElementSelected?.invoke(null)
+        onLayoutChanged?.invoke()
+        invalidate()
+        return true
+    }
+
+    fun toggleSelectedElementEnabled(): Boolean {
+        val current = selectedElement ?: return false
+        current.isEnabled = !current.isEnabled
+        onElementSelected?.invoke(current)
+        onLayoutChanged?.invoke()
+        invalidate()
+        return current.isEnabled
+    }
+
+    fun setElementEnabled(element: HudElement, enabled: Boolean) {
+        element.isEnabled = enabled
+        onElementSelected?.invoke(selectedElement)
+        onLayoutChanged?.invoke()
+        invalidate()
+    }
+
+    fun restoreStockElement(el: HudElement): Boolean {
+        if (elements.any { it.id == el.id }) return false
+        val maxZ = (elements.maxOfOrNull { it.zOrder } ?: 20) + 1
+        val restored = el.copy(zOrder = maxZ, isEnabled = true)
+        elements.add(restored)
+        selectedElement = restored
+        onElementSelected?.invoke(restored)
         onLayoutChanged?.invoke()
         invalidate()
         return true
