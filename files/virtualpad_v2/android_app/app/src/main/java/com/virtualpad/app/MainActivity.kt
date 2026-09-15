@@ -7,6 +7,7 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.hardware.Sensor
 import android.hardware.SensorEvent
@@ -14,6 +15,8 @@ import android.hardware.SensorEventListener
 import android.hardware.SensorManager
 import android.os.Build
 import android.os.Bundle
+import android.text.Editable
+import android.text.TextWatcher
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.Surface
@@ -411,10 +414,10 @@ class MainActivity : Activity(), SensorEventListener {
             setPadding(0, 0, 0, 16)
         }
         val switchProfileBtn = Button(this).apply {
-            text = "Switch Profile"
+            text = "🎮 Game Presets & Profiles"
             textSize = 12f
             setTextColor(Color.WHITE)
-            background = createCardDrawable(Color.parseColor("#374151"), 12f)
+            background = createCardDrawable(Color.parseColor("#1F6FEB"), 12f)
             setPadding(20, 8, 20, 8)
         }
         profileRow.addView(switchProfileBtn, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { rightMargin = 12 })
@@ -831,19 +834,7 @@ class MainActivity : Activity(), SensorEventListener {
         }
 
         switchProfileBtn.setOnClickListener {
-            val profiles = HudConfig.getProfiles(this).toTypedArray()
-            AlertDialog.Builder(this)
-                .setTitle("Select Game Preset")
-                .setItems(profiles) { _, which ->
-                    val chosen = profiles[which]
-                    HudConfig.setActiveProfile(this, chosen)
-                    controllerView.loadProfile(chosen)
-                    val keymap = HudConfig.extractKeymap(controllerView.elements)
-                    networkClient.sendKeymapSync(keymap)
-                    profileLabel.text = "Game Preset Profile: $chosen"
-                    Toast.makeText(this, "Loaded preset: $chosen", Toast.LENGTH_SHORT).show()
-                }
-                .show()
+            showGamePresetDialog(profileLabel, dialog)
         }
 
         newProfileBtn.setOnClickListener {
@@ -869,6 +860,335 @@ class MainActivity : Activity(), SensorEventListener {
     }
 
     // -------------------------------------------------------------------
+    // PC Game Presets & Claw Layout Selector Dialog
+    // -------------------------------------------------------------------
+    private fun showGamePresetDialog(profileLabel: TextView?, parentDialog: AlertDialog? = null) {
+        var selectedClaw = HudConfig.ClawStyle.TWO_FINGER
+
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = createCardDrawable(Color.parseColor("#161B22"), 20f, Color.parseColor("#30363D"), 2)
+            setPadding(24, 20, 24, 20)
+        }
+
+        // Header Title
+        val titleView = TextView(this).apply {
+            text = "🎮 PC Game Presets & Claw HUDs"
+            setTextColor(Color.parseColor("#58A6FF"))
+            textSize = 17f
+            paint.isFakeBoldText = true
+            setPadding(0, 0, 0, 4)
+        }
+        container.addView(titleView)
+
+        val subtitleView = TextView(this).apply {
+            text = "Pre-configured PC controls with authentic key labels. Select your claw grip style below."
+            setTextColor(Color.parseColor("#8B949E"))
+            textSize = 11f
+            setPadding(0, 0, 0, 10)
+        }
+        container.addView(subtitleView)
+
+        // Claw Selection Buttons Row
+        val clawRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, 0, 0, 6)
+        }
+
+        val clawButtons = mutableListOf<Button>()
+        val clawStyles = listOf(
+            HudConfig.ClawStyle.TWO_FINGER,
+            HudConfig.ClawStyle.THREE_FINGER,
+            HudConfig.ClawStyle.FOUR_FINGER
+        )
+
+        val clawDescView = TextView(this).apply {
+            text = "✌️ 2-Finger: Standard thumb controls. Action buttons clustered on right thumb."
+            setTextColor(Color.parseColor("#79C0FF"))
+            textSize = 11f
+            setPadding(0, 0, 0, 10)
+        }
+
+        fun updateClawButtonStyles() {
+            clawButtons.forEachIndexed { index, btn ->
+                val style = clawStyles[index]
+                if (style == selectedClaw) {
+                    btn.background = createCardDrawable(Color.parseColor("#1F6FEB"), 10f, Color.parseColor("#58A6FF"), 2)
+                    btn.setTextColor(Color.WHITE)
+                    btn.paint.isFakeBoldText = true
+                } else {
+                    btn.background = createCardDrawable(Color.parseColor("#21262D"), 10f, Color.parseColor("#30363D"), 1)
+                    btn.setTextColor(Color.parseColor("#8B949E"))
+                    btn.paint.isFakeBoldText = false
+                }
+            }
+            clawDescView.text = when (selectedClaw) {
+                HudConfig.ClawStyle.TWO_FINGER -> "✌️ 2-Finger: Standard thumb controls. Action buttons clustered on right thumb."
+                HudConfig.ClawStyle.THREE_FINGER -> "🤟 3-Finger: Right index on top trigger/aim, right thumb on actions."
+                HudConfig.ClawStyle.FOUR_FINGER -> "🖐️ 4-Finger: Left & right index on upper bumpers/triggers for instant response."
+            }
+        }
+
+        clawStyles.forEach { style ->
+            val btn = Button(this).apply {
+                text = when (style) {
+                    HudConfig.ClawStyle.TWO_FINGER -> "✌️ 2-Finger"
+                    HudConfig.ClawStyle.THREE_FINGER -> "🤟 3-Finger"
+                    HudConfig.ClawStyle.FOUR_FINGER -> "🖐️ 4-Finger Claw"
+                }
+                textSize = 11f
+                setPadding(10, 6, 10, 6)
+                setOnClickListener {
+                    selectedClaw = style
+                    updateClawButtonStyles()
+                }
+            }
+            clawButtons.add(btn)
+            clawRow.addView(btn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginEnd = if (style != HudConfig.ClawStyle.FOUR_FINGER) 8 else 0
+            })
+        }
+        updateClawButtonStyles()
+        container.addView(clawRow)
+        container.addView(clawDescView)
+
+        // Search Input Bar
+        val searchBox = EditText(this).apply {
+            hint = "🔍 Search 36+ games (e.g. GTA, Elden, CS2, Cyberpunk)..."
+            setHintTextColor(Color.parseColor("#8B949E"))
+            setTextColor(Color.WHITE)
+            textSize = 12f
+            setSingleLine(true)
+            background = createCardDrawable(Color.parseColor("#0D1117"), 10f, Color.parseColor("#30363D"), 1)
+            setPadding(16, 10, 16, 10)
+        }
+        container.addView(searchBox, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+            bottomMargin = 8
+        })
+
+        // Scrollable game list
+        val scrollView = ScrollView(this).apply {
+            isFillViewport = true
+        }
+        val listContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        scrollView.addView(listContainer)
+
+        var dialogRef: AlertDialog? = null
+
+        fun selectAndApplyPreset(profileName: String, gamePreset: HudConfig.GamePreset?) {
+            if (gamePreset != null) {
+                val layout = HudConfig.generateGameLayout(gamePreset, selectedClaw)
+                HudConfig.saveLayout(this@MainActivity, layout, profileName)
+            }
+            HudConfig.addProfile(this@MainActivity, profileName)
+            HudConfig.setActiveProfile(this@MainActivity, profileName)
+            controllerView.loadProfile(profileName)
+            val keymap = HudConfig.extractKeymap(controllerView.elements)
+            networkClient.sendKeymapSync(keymap)
+            profileLabel?.text = "Game Preset Profile: $profileName"
+            val toastMsg = if (gamePreset != null) {
+                "🎮 Loaded ${gamePreset.name} (${selectedClaw.displayName})"
+            } else {
+                "Loaded preset: $profileName"
+            }
+            Toast.makeText(this@MainActivity, toastMsg, Toast.LENGTH_SHORT).show()
+            dialogRef?.dismiss()
+            parentDialog?.dismiss()
+        }
+
+        fun populateList(query: String) {
+            listContainer.removeAllViews()
+            val filter = query.trim().lowercase()
+
+            // 1. Classic Saved Profiles
+            val savedProfiles = HudConfig.getProfiles(this@MainActivity)
+            val matchedProfiles = savedProfiles.filter { filter.isEmpty() || it.lowercase().contains(filter) }
+            if (matchedProfiles.isNotEmpty() && filter.isEmpty()) {
+                val classicHeader = TextView(this@MainActivity).apply {
+                    text = "SAVED / ACTIVE PROFILES"
+                    setTextColor(Color.parseColor("#8B949E"))
+                    textSize = 10f
+                    paint.isFakeBoldText = true
+                    setPadding(0, 4, 0, 4)
+                }
+                listContainer.addView(classicHeader)
+
+                val chipRow = HorizontalScrollView(this@MainActivity).apply {
+                    isHorizontalScrollBarEnabled = false
+                    setPadding(0, 0, 0, 8)
+                }
+                val chipLayout = LinearLayout(this@MainActivity).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                }
+                matchedProfiles.forEach { prof ->
+                    val chip = Button(this@MainActivity).apply {
+                        text = prof
+                        textSize = 10f
+                        setTextColor(Color.parseColor("#E6EDF3"))
+                        background = createCardDrawable(Color.parseColor("#21262D"), 8f, Color.parseColor("#30363D"), 1)
+                        setPadding(12, 4, 12, 4)
+                        setOnClickListener {
+                            selectAndApplyPreset(prof, null)
+                        }
+                    }
+                    chipLayout.addView(chip, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                        marginEnd = 6
+                    })
+                }
+                chipRow.addView(chipLayout)
+                listContainer.addView(chipRow)
+            }
+
+            // 2. PC Game Presets
+            val matchedGames = HudConfig.ALL_GAME_PRESETS.filter { game ->
+                filter.isEmpty() ||
+                game.name.lowercase().contains(filter) ||
+                game.category.lowercase().contains(filter) ||
+                game.id.lowercase().contains(filter)
+            }
+
+            if (matchedGames.isEmpty()) {
+                val emptyView = TextView(this@MainActivity).apply {
+                    text = "No games matching \"$query\""
+                    setTextColor(Color.parseColor("#8B949E"))
+                    textSize = 12f
+                    gravity = Gravity.CENTER
+                    setPadding(0, 30, 0, 30)
+                }
+                listContainer.addView(emptyView)
+                return
+            }
+
+            var lastCat = ""
+            matchedGames.forEach { game ->
+                if (filter.isEmpty() && game.category != lastCat) {
+                    lastCat = game.category
+                    val catHeader = TextView(this@MainActivity).apply {
+                        text = "— ${lastCat.uppercase()} —"
+                        setTextColor(Color.parseColor("#58A6FF"))
+                        textSize = 10f
+                        paint.isFakeBoldText = true
+                        setPadding(4, 8, 0, 4)
+                    }
+                    listContainer.addView(catHeader)
+                }
+
+                // Game Card
+                val card = LinearLayout(this@MainActivity).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    background = createCardDrawable(Color.parseColor("#21262D"), 10f, Color.parseColor("#30363D"), 1)
+                    setPadding(14, 10, 14, 10)
+                    isClickable = true
+                    isFocusable = true
+                }
+
+                val textColumn = LinearLayout(this@MainActivity).apply {
+                    orientation = LinearLayout.VERTICAL
+                }
+
+                val titleRow = LinearLayout(this@MainActivity).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                }
+
+                val nameView = TextView(this@MainActivity).apply {
+                    text = game.name
+                    setTextColor(Color.WHITE)
+                    textSize = 13f
+                    paint.isFakeBoldText = true
+                }
+                titleRow.addView(nameView)
+
+                val badgeView = TextView(this@MainActivity).apply {
+                    text = " ${game.category} "
+                    setTextColor(Color.parseColor("#79C0FF"))
+                    textSize = 9f
+                    background = createCardDrawable(Color.parseColor("#1F385C"), 6f)
+                    setPadding(6, 2, 6, 2)
+                }
+                titleRow.addView(badgeView, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                    marginStart = 8
+                })
+                textColumn.addView(titleRow)
+
+                val previewSnippet = game.bindings.take(4).joinToString(" • ") { "${it.key.uppercase()}: ${it.action}" }
+                val keyDescView = TextView(this@MainActivity).apply {
+                    text = "$previewSnippet (+${game.bindings.size - 4} keys)"
+                    setTextColor(Color.parseColor("#8B949E"))
+                    textSize = 10f
+                    setPadding(0, 2, 0, 0)
+                }
+                textColumn.addView(keyDescView)
+
+                card.addView(textColumn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+
+                val applyBtn = Button(this@MainActivity).apply {
+                    text = "Load ➔"
+                    textSize = 10f
+                    setTextColor(Color.WHITE)
+                    background = createCardDrawable(Color.parseColor("#238636"), 8f)
+                    setPadding(10, 4, 10, 4)
+                }
+                card.addView(applyBtn, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                    marginStart = 10
+                })
+
+                val clickAction = View.OnClickListener {
+                    val profileName = "${game.name} (${selectedClaw.displayName})"
+                    selectAndApplyPreset(profileName, game)
+                }
+                card.setOnClickListener(clickAction)
+                applyBtn.setOnClickListener(clickAction)
+
+                listContainer.addView(card, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                    bottomMargin = 6
+                })
+            }
+        }
+
+        populateList("")
+
+        searchBox.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                populateList(s?.toString() ?: "")
+            }
+            override fun afterTextChanged(s: Editable?) {}
+        })
+
+        container.addView(scrollView, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+
+        val closeBtn = Button(this).apply {
+            text = "Close"
+            textSize = 11f
+            setTextColor(Color.parseColor("#8B949E"))
+            background = createCardDrawable(Color.parseColor("#21262D"), 8f)
+            setPadding(12, 6, 12, 6)
+            setOnClickListener {
+                dialogRef?.dismiss()
+            }
+        }
+        container.addView(closeBtn, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+            topMargin = 6
+        })
+
+        dialogRef = AlertDialog.Builder(this)
+            .setView(container)
+            .create()
+
+        dialogRef?.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+        dialogRef?.show()
+
+        val dm = resources.displayMetrics
+        val dialogWidth = (dm.widthPixels * 0.88).toInt().coerceAtLeast(600)
+        val dialogHeight = (dm.heightPixels * 0.90).toInt().coerceAtLeast(340)
+        dialogRef?.window?.setLayout(dialogWidth, dialogHeight)
+    }
+
+    // -------------------------------------------------------------------
     // HUD Edit Mode Overlay
     // -------------------------------------------------------------------
     private fun buildEditOverlay(root: FrameLayout) {
@@ -890,6 +1210,18 @@ class MainActivity : Activity(), SensorEventListener {
         }
         val titleParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         topEditorBar.addView(title, titleParams)
+
+        val presetBtn = Button(this).apply {
+            text = "🎮 Presets"
+            textSize = 12f
+            setTextColor(Color.WHITE)
+            background = createCardDrawable(Color.parseColor("#238636"), 14f)
+            setPadding(18, 8, 18, 8)
+            setOnClickListener {
+                showGamePresetDialog(null, null)
+            }
+        }
+        topEditorBar.addView(presetBtn, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { rightMargin = 10 })
 
         val manageBtn = Button(this).apply {
             text = "🎛️ Controls Manager"
