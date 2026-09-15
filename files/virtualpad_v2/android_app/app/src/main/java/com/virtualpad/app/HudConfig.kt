@@ -1238,7 +1238,7 @@ object HudConfig {
             list.add(
                 HudElement(
                     id = "small_icon",
-                    label = "ESC",
+                    label = "PAUSE",
                     key = "esc",
                     type = ElementType.BUTTON,
                     xPct = 0.45f,
@@ -1253,17 +1253,17 @@ object HudConfig {
             var customSlotIdx = 0
             for (b in preset.bindings) {
                 val info = when (b.role) {
-                    BindingRole.PRIMARY_TRIGGER -> ControllerBtnInfo("rt", "RT", false, -1)
-                    BindingRole.SECONDARY_TRIGGER -> ControllerBtnInfo("lt", "LT", false, -1)
-                    BindingRole.ABILITY_1 -> ControllerBtnInfo("lb", "LB", false, -1)
-                    BindingRole.ABILITY_2 -> ControllerBtnInfo("rb", "RB", false, -1)
-                    BindingRole.JUMP -> ControllerBtnInfo("x", "X", false, -1)
-                    BindingRole.SPRINT -> ControllerBtnInfo("a", "A", false, -1)
-                    BindingRole.INTERACT -> ControllerBtnInfo("y", "Y", false, -1)
-                    BindingRole.RELOAD -> ControllerBtnInfo("b", "B", false, -1)
-                    BindingRole.CROUCH -> ControllerBtnInfo("lsb", "LSB", false, -1)
-                    BindingRole.ABILITY_3 -> ControllerBtnInfo("rsb", "RSB", false, -1)
-                    BindingRole.MAP_MENU -> ControllerBtnInfo("hamburger_icon", "B", false, -1)
+                    BindingRole.PRIMARY_TRIGGER -> ControllerBtnInfo("rt", b.action, false, -1)
+                    BindingRole.SECONDARY_TRIGGER -> ControllerBtnInfo("lt", b.action, false, -1)
+                    BindingRole.ABILITY_1 -> ControllerBtnInfo("lb", b.action, false, -1)
+                    BindingRole.ABILITY_2 -> ControllerBtnInfo("rb", b.action, false, -1)
+                    BindingRole.JUMP -> ControllerBtnInfo("x", b.action, false, -1)
+                    BindingRole.SPRINT -> ControllerBtnInfo("a", b.action, false, -1)
+                    BindingRole.INTERACT -> ControllerBtnInfo("y", b.action, false, -1)
+                    BindingRole.RELOAD -> ControllerBtnInfo("b", b.action, false, -1)
+                    BindingRole.CROUCH -> ControllerBtnInfo("lsb", b.action, false, -1)
+                    BindingRole.ABILITY_3 -> ControllerBtnInfo("rsb", b.action, false, -1)
+                    BindingRole.MAP_MENU -> ControllerBtnInfo("hamburger_icon", b.action, false, -1)
                     else -> {
                         val slot = customSlotIdx++
                         ControllerBtnInfo("custom_$slot", b.action, true, slot)
