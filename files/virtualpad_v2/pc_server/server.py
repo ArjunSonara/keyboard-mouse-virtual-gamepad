@@ -35,6 +35,8 @@ import struct
 import threading
 import time
 import sys
+import os
+import shutil
 import ctypes
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -466,27 +468,33 @@ def tcp_listener():
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind(("127.0.0.1", PORT))
-    sock.listen(1)
+    sock.listen(5)
     print(f"[USB/TCP] listening on 127.0.0.1:{PORT} (use: adb reverse tcp:{PORT} tcp:{PORT})")
     while True:
         try:
             conn, _ = sock.accept()
-            conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            print("[USB/TCP] phone connected over USB")
-            buf = bytearray()
-            while True:
-                chunk = conn.recv(512)
-                if not chunk:
-                    break
-                buf.extend(chunk)
-                # Frame format: 2-byte little endian unsigned short (length) + payload
-                while len(buf) >= 2:
-                    packet_len = struct.unpack("<H", buf[:2])[0]
-                    if len(buf) < 2 + packet_len:
-                        break  # Wait for remaining packet payload to arrive
-                    payload = bytes(buf[2 : 2 + packet_len])
-                    del buf[: 2 + packet_len]
-                    dispatch_packet(payload)
+            try:
+                conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                print("[USB/TCP] phone connected over USB")
+                buf = bytearray()
+                while True:
+                    chunk = conn.recv(1024)
+                    if not chunk:
+                        break
+                    buf.extend(chunk)
+                    # Frame format: 2-byte little endian unsigned short (length) + payload
+                    while len(buf) >= 2:
+                        packet_len = struct.unpack("<H", buf[:2])[0]
+                        if len(buf) < 2 + packet_len:
+                            break  # Wait for remaining packet payload to arrive
+                        payload = bytes(buf[2 : 2 + packet_len])
+                        del buf[: 2 + packet_len]
+                        dispatch_packet(payload)
+            finally:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
             print("[USB/TCP] phone disconnected")
             release_everything()
         except Exception as e:
@@ -598,6 +606,35 @@ def show_qr_popup(ip: str, port: int):
 
 
 _last_reversed_devices = set()
+_cached_adb_bin = None
+
+def get_adb_bin():
+    global _cached_adb_bin
+    if _cached_adb_bin and os.path.exists(_cached_adb_bin):
+        return _cached_adb_bin
+
+    adb_which = shutil.which("adb")
+    if adb_which:
+        _cached_adb_bin = adb_which
+        return _cached_adb_bin
+
+    candidates = [
+        r"C:\Users\arjun\Downloads\platform-tools-latest-windows\platform-tools\adb.exe",
+        r"C:\Users\arjun\AppData\Local\Android\Sdk\platform-tools\adb.exe",
+        os.path.expandvars(r"%LOCALAPPDATA%\Android\Sdk\platform-tools\adb.exe"),
+    ]
+    for c in candidates:
+        if os.path.isfile(c):
+            _cached_adb_bin = c
+            return _cached_adb_bin
+        try:
+            r = silent_run([c, "version"], capture_output=True, text=True, timeout=5)
+            if r.returncode == 0:
+                _cached_adb_bin = c
+                return _cached_adb_bin
+        except Exception:
+            continue
+    return None
 
 def auto_adb_reverse():
     """
@@ -605,32 +642,20 @@ def auto_adb_reverse():
     adb reverse tcp:PORT tcp:PORT so the user never needs to type it manually.
     """
     global _last_reversed_devices
-    import subprocess
-    import os
-    candidates = [
-        "adb",
-        r"C:\Users\arjun\AppData\Local\Android\Sdk\platform-tools\adb.exe",
-        os.path.expandvars(r"%LOCALAPPDATA%\Android\Sdk\platform-tools\adb.exe"),
-    ]
-    adb_bin = None
-    for c in candidates:
-        try:
-            r = silent_run([c, "version"], capture_output=True, text=True, timeout=2)
-            if r.returncode == 0:
-                adb_bin = c
-                break
-        except Exception:
-            continue
-
+    adb_bin = get_adb_bin()
     if not adb_bin:
         return
 
     try:
-        r = silent_run([adb_bin, "devices"], capture_output=True, text=True, timeout=2)
-        devs = set([line.split("\t")[0].strip() for line in r.stdout.splitlines() if "\tdevice" in line])
+        r = silent_run([adb_bin, "devices"], capture_output=True, text=True, timeout=10)
+        lines = r.stdout.splitlines()
+        devs = set([line.split("\t")[0].strip() for line in lines if "\tdevice" in line])
         if devs:
-            if devs != _last_reversed_devices:
-                rev = silent_run([adb_bin, "reverse", f"tcp:{PORT}", f"tcp:{PORT}"], capture_output=True, text=True, timeout=2)
+            rev_list = silent_run([adb_bin, "reverse", "--list"], capture_output=True, text=True, timeout=5)
+            is_reversed = f"tcp:{PORT}" in (rev_list.stdout or "")
+
+            if not is_reversed or devs != _last_reversed_devices:
+                rev = silent_run([adb_bin, "reverse", f"tcp:{PORT}", f"tcp:{PORT}"], capture_output=True, text=True, timeout=8)
                 if rev.returncode == 0:
                     _last_reversed_devices = devs
                     print(f"[Auto-USB] Port forwarded! (adb reverse tcp:{PORT} tcp:{PORT} active for {len(devs)} device)")
@@ -644,9 +669,9 @@ def _usb_watcher_loop():
     while True:
         try:
             auto_adb_reverse()
-            time.sleep(4)
+            time.sleep(3)
         except Exception:
-            time.sleep(4)
+            time.sleep(3)
 
 
 # ---------------------------------------------------------------------------

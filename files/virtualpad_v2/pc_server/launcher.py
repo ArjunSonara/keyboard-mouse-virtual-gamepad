@@ -15,6 +15,7 @@ import threading
 import ctypes
 import subprocess
 import json
+import shutil
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(line_buffering=True)
@@ -237,6 +238,7 @@ def request_key(key: str, source: str, pressed: bool):
     sources = _key_sources.setdefault(key, set())
     if pressed:
         if source in sources:
+            # This source is already holding the key (e.g. stick moving while already tilted).
             # Maintain the hold continuously without spamming pulses!
             return
         was_already_held = len(sources) > 0
@@ -388,28 +390,36 @@ def tcp_listener():
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
         sock.bind(("127.0.0.1", PORT))
-        sock.listen(1)
+        sock.listen(5)
     except Exception:
         return
     while True:
         try:
             conn, _ = sock.accept()
-            conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            connection_status = "Connected (USB Cable)"
-            buf = bytearray()
-            while True:
-                chunk = conn.recv(512)
-                if not chunk:
-                    break
-                buf.extend(chunk)
-                while len(buf) >= 2:
-                    packet_len = struct.unpack("<H", buf[:2])[0]
-                    if len(buf) < 2 + packet_len:
+            try:
+                conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                connection_status = "Connected (USB Cable)"
+                print("[USB/TCP] phone connected over USB", flush=True)
+                buf = bytearray()
+                while True:
+                    chunk = conn.recv(1024)
+                    if not chunk:
                         break
-                    payload = bytes(buf[2 : 2 + packet_len])
-                    del buf[: 2 + packet_len]
-                    dispatch_packet(payload)
+                    buf.extend(chunk)
+                    while len(buf) >= 2:
+                        packet_len = struct.unpack("<H", buf[:2])[0]
+                        if len(buf) < 2 + packet_len:
+                            break
+                        payload = bytes(buf[2 : 2 + packet_len])
+                        del buf[: 2 + packet_len]
+                        dispatch_packet(payload)
+            finally:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
             connection_status = "Phone disconnected"
+            print("[USB/TCP] phone disconnected", flush=True)
             release_everything()
         except Exception:
             connection_status = "Waiting for phone..."
@@ -438,22 +448,38 @@ def silent_check_output(*args, **kwargs):
     kwargs.setdefault("stdin", subprocess.DEVNULL)
     return subprocess.check_output(*args, **kwargs)
 
+def silent_popen(*args, **kwargs):
+    for k, v in _get_subprocess_kwargs().items():
+        kwargs.setdefault(k, v)
+    kwargs.setdefault("stdin", subprocess.DEVNULL)
+    return subprocess.Popen(*args, **kwargs)
+
 usb_status_str = "Checking USB..."
 _last_reversed_devices = set()
 _cached_adb_bin = None
 
 def get_adb_bin():
     global _cached_adb_bin
-    if _cached_adb_bin:
+    if _cached_adb_bin and os.path.exists(_cached_adb_bin):
         return _cached_adb_bin
+
+    # Check PATH first via shutil.which (instant, no subprocess needed)
+    adb_which = shutil.which("adb")
+    if adb_which:
+        _cached_adb_bin = adb_which
+        return _cached_adb_bin
+
     candidates = [
-        "adb",
+        r"C:\Users\arjun\Downloads\platform-tools-latest-windows\platform-tools\adb.exe",
         r"C:\Users\arjun\AppData\Local\Android\Sdk\platform-tools\adb.exe",
         os.path.expandvars(r"%LOCALAPPDATA%\Android\Sdk\platform-tools\adb.exe"),
     ]
     for c in candidates:
+        if os.path.isfile(c):
+            _cached_adb_bin = c
+            return _cached_adb_bin
         try:
-            r = silent_run([c, "version"], capture_output=True, text=True, timeout=2)
+            r = silent_run([c, "version"], capture_output=True, text=True, timeout=5)
             if r.returncode == 0:
                 _cached_adb_bin = c
                 return _cached_adb_bin
@@ -461,24 +487,144 @@ def get_adb_bin():
             continue
     return None
 
+REVERSE_PORTS = [6001, 8080, 8081, 8082]
+pcmirror_process = None
+job_object_handle = None
+
+def init_job_object():
+    global job_object_handle
+    try:
+        from ctypes import wintypes
+        kernel32 = ctypes.windll.kernel32
+        job = kernel32.CreateJobObjectW(None, None)
+        if job:
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION = 9
+            class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+                _fields_ = [
+                    ("PerProcessUserTimeLimit", wintypes.LARGE_INTEGER),
+                    ("PerJobUserTimeLimit", wintypes.LARGE_INTEGER),
+                    ("LimitFlags", wintypes.DWORD),
+                    ("MinimumWorkingSetSize", ctypes.c_size_t),
+                    ("MaximumWorkingSetSize", ctypes.c_size_t),
+                    ("ActiveProcessLimit", wintypes.DWORD),
+                    ("Affinity", ctypes.c_size_t),
+                    ("PriorityClass", wintypes.DWORD),
+                    ("SchedulingClass", wintypes.DWORD),
+                ]
+            class IO_COUNTERS(ctypes.Structure):
+                _fields_ = [
+                    ("ReadOperationCount", ctypes.c_ulonglong),
+                    ("WriteOperationCount", ctypes.c_ulonglong),
+                    ("OtherOperationCount", ctypes.c_ulonglong),
+                    ("ReadTransferCount", ctypes.c_ulonglong),
+                    ("WriteTransferCount", ctypes.c_ulonglong),
+                    ("OtherTransferCount", ctypes.c_ulonglong),
+                ]
+            class JOBOBJECT_EXTENDED_LIMIT_INFORMATION_STRUCT(ctypes.Structure):
+                _fields_ = [
+                    ("BasicLimitInformation", JOBOBJECT_BASIC_LIMIT_INFORMATION),
+                    ("IoCounters", IO_COUNTERS),
+                    ("ProcessMemoryLimit", ctypes.c_size_t),
+                    ("JobMemoryLimit", ctypes.c_size_t),
+                    ("PeakProcessMemoryLimit", ctypes.c_size_t),
+                    ("PeakJobMemoryLimit", ctypes.c_size_t),
+                ]
+            info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION_STRUCT()
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            kernel32.SetInformationJobObject(job, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, ctypes.byref(info), ctypes.sizeof(info))
+            job_object_handle = job
+    except Exception as e:
+        print(f"[WARN] Could not initialize Windows Job Object: {e}")
+
+def assign_process_to_job(proc):
+    if job_object_handle and proc and hasattr(proc, "_handle"):
+        try:
+            kernel32 = ctypes.windll.kernel32
+            kernel32.AssignProcessToJobObject(job_object_handle, proc._handle)
+        except Exception as e:
+            print(f"[WARN] Could not assign process to Job Object: {e}")
+
+def get_pcmirror_bin():
+    # Check PyInstaller bundle dir, script dir, or workspace root
+    base_dirs = [
+        getattr(sys, "_MEIPASS", ""),
+        os.path.dirname(os.path.abspath(__file__)),
+        os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")),
+        os.getcwd(),
+    ]
+    for b in base_dirs:
+        if b:
+            p = os.path.join(b, "PCMirror.exe")
+            if os.path.isfile(p):
+                return p
+    return shutil.which("PCMirror.exe")
+
+def start_pcmirror_daemon():
+    global pcmirror_process
+    # Preflight sweep: cleanly kill any zombie PCMirror.exe from previous dirty crashes
+    try:
+        silent_run(["taskkill", "/F", "/IM", "PCMirror.exe", "/T"], capture_output=True, timeout=3)
+        time.sleep(0.3)
+    except Exception:
+        pass
+
+    pcmirror_bin = get_pcmirror_bin()
+    if not pcmirror_bin:
+        print("[WARN] PCMirror.exe not found. Screen mirroring will require manual launch.")
+        return
+
+    try:
+        # Args: <port> <width> <height> <fps> <bitrate>
+        # 8080 0 0 60 35000000 (0 0 auto-detects native screen resolution)
+        cmd = [pcmirror_bin, "8080", "0", "0", "60", "35000000"]
+        pcmirror_process = silent_popen(cmd, cwd=os.path.dirname(pcmirror_bin))
+        assign_process_to_job(pcmirror_process)
+        print(f"[INFO] PCMirror native engine started (PID: {pcmirror_process.pid})")
+    except Exception as e:
+        print(f"[ERROR] Failed to start PCMirror: {e}")
+
 def auto_adb_reverse():
     global usb_status_str, _last_reversed_devices
     adb_bin = get_adb_bin()
 
     if not adb_bin:
-        usb_status_str = "ADB not found (Use Wi-Fi or install Android SDK platform-tools)"
+        usb_status_str = "ADB not found (Use Wi-Fi or install Android platform-tools)"
         return
 
     try:
-        r = silent_run([adb_bin, "devices"], capture_output=True, text=True, timeout=2)
-        devs = set([line.split("\t")[0].strip() for line in r.stdout.splitlines() if "\tdevice" in line])
-        if devs:
-            if devs != _last_reversed_devices:
-                rev = silent_run([adb_bin, "reverse", f"tcp:{PORT}", f"tcp:{PORT}"], capture_output=True, text=True, timeout=2)
-                if rev.returncode == 0:
-                    _last_reversed_devices = devs
-            usb_status_str = f"🟢 USB Ready: adb reverse active ({len(devs)} device connected)"
+        # Give enough timeout (10s) for cold ADB daemon startup
+        r = silent_run([adb_bin, "devices"], capture_output=True, text=True, timeout=10)
+        lines = r.stdout.splitlines()
+        devs = set([line.split("\t")[0].strip() for line in lines if "\tdevice" in line])
+        unauthorized = any("\tunauthorized" in line for line in lines)
+
+        if unauthorized and not devs:
+            usb_status_str = "⚠️ Phone unauthorized: Tap 'Allow USB debugging' on phone"
             return
+
+        if devs:
+            # Query actual reverse forwarding list on device
+            rev_list = silent_run([adb_bin, "reverse", "--list"], capture_output=True, text=True, timeout=5)
+            rev_output = rev_list.stdout or ""
+            missing_ports = [p for p in REVERSE_PORTS if f"tcp:{p}" not in rev_output]
+
+            if missing_ports or devs != _last_reversed_devices:
+                all_ok = True
+                for p in REVERSE_PORTS:
+                    rev = silent_run([adb_bin, "reverse", f"tcp:{p}", f"tcp:{p}"], capture_output=True, text=True, timeout=8)
+                    if rev.returncode != 0:
+                        all_ok = False
+                if all_ok:
+                    _last_reversed_devices = devs
+                    usb_status_str = f"🟢 USB Ready: All 4 ports routed ({len(devs)} device connected)"
+                    return
+                else:
+                    usb_status_str = f"⚠️ ADB reverse partial/failed on some ports"
+                    return
+            else:
+                usb_status_str = f"🟢 USB Ready: All 4 ports routed ({len(devs)} device connected)"
+                return
         _last_reversed_devices.clear()
         usb_status_str = "⚪ USB: Plug in phone with USB Debugging enabled"
     except Exception as e:
@@ -488,9 +634,9 @@ def _usb_watcher_loop():
     while True:
         try:
             auto_adb_reverse()
-            time.sleep(5)
+            time.sleep(3)
         except Exception:
-            time.sleep(5)
+            time.sleep(3)
 
 def get_local_ip():
     adapters = {}
@@ -536,6 +682,9 @@ def get_local_ip():
 def main():
     import tkinter as tk
 
+    init_job_object()
+    start_pcmirror_daemon()
+
     local_ip = get_local_ip()
 
     # Start network workers
@@ -545,26 +694,26 @@ def main():
 
     # Modern Dark GUI Window
     root = tk.Tk()
-    root.title("Virtual Pad - Server (v2)")
-    root.geometry("440x560")
+    root.title("VirtualPad Console Server (Hybrid)")
+    root.geometry("460x610")
     root.configure(bg="#0D1117")
     root.resizable(False, False)
 
     title_label = tk.Label(
-        root, text="VIRTUAL PAD SERVER", font=("Segoe UI", 16, "bold"),
+        root, text="VIRTUALPAD CONSOLE SERVER", font=("Segoe UI", 15, "bold"),
         fg="#58A6FF", bg="#0D1117"
     )
     title_label.pack(pady=(16, 4))
 
     subtitle_label = tk.Label(
-        root, text="Zero-Latency Virtual Gamepad for PC", font=("Segoe UI", 10),
+        root, text="Zero-Latency Screen Mirroring & Gamepad Server", font=("Segoe UI", 9),
         fg="#8B949E", bg="#0D1117"
     )
-    subtitle_label.pack(pady=(0, 12))
+    subtitle_label.pack(pady=(0, 10))
 
     # QR Code Frame
-    qr_frame = tk.Frame(root, bg="#161B22", padx=12, pady=12, highlightbackground="#30363D", highlightthickness=1)
-    qr_frame.pack(padx=20, pady=8)
+    qr_frame = tk.Frame(root, bg="#161B22", padx=10, pady=10, highlightbackground="#30363D", highlightthickness=1)
+    qr_frame.pack(padx=20, pady=6)
 
     if QR_AVAILABLE:
         qr_img = qrcode.make(f"{local_ip}:{PORT}", box_size=5, border=2)
@@ -578,7 +727,13 @@ def main():
         root, text=f"Wi-Fi Pairing: {local_ip}:{PORT}", font=("Consolas", 11, "bold"),
         fg="#58A6FF", bg="#0D1117"
     )
-    status_label.pack(pady=(8, 2))
+    status_label.pack(pady=(6, 2))
+
+    services_label = tk.Label(
+        root, text="🎮 Input: :6001 | 🖥️ Video: :8080 | 🔊 Audio: :8082", font=("Consolas", 9),
+        fg="#79C0FF", bg="#0D1117"
+    )
+    services_label.pack(pady=(2, 4))
 
     usb_label = tk.Label(
         root, text=usb_status_str, font=("Segoe UI", 9),
@@ -600,7 +755,18 @@ def main():
     root.after(1000, update_gui_loop)
 
     def on_exit():
+        global pcmirror_process
         release_everything()
+        if pcmirror_process:
+            try:
+                pcmirror_process.terminate()
+            except Exception:
+                pass
+            pcmirror_process = None
+        try:
+            silent_run(["taskkill", "/F", "/IM", "PCMirror.exe", "/T"], capture_output=True, timeout=2)
+        except Exception:
+            pass
         root.destroy()
 
     root.protocol("WM_DELETE_WINDOW", on_exit)

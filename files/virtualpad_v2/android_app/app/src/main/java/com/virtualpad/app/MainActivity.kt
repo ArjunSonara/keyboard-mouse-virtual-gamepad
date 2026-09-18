@@ -20,6 +20,8 @@ import android.text.TextWatcher
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.Surface
+import android.view.SurfaceHolder
+import android.view.SurfaceView
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
@@ -52,6 +54,33 @@ class MainActivity : Activity(), SensorEventListener {
     private lateinit var networkClient: NetworkClient
     private lateinit var prefs: android.content.SharedPreferences
     private lateinit var gearButton: Button
+
+    // PCMirror Streaming & Viewport Modules
+    private lateinit var surfaceView: SurfaceView
+    private lateinit var videoMirrorClient: VideoMirrorClient
+    private lateinit var audioMirrorClient: AudioMirrorClient
+    private lateinit var streamControlClient: StreamControlClient
+    private lateinit var viewportManager: ViewportManager
+    private lateinit var streamGearButton: Button
+    private var viewportAdjustOverlay: FrameLayout? = null
+    private var currentHostIp: String = "127.0.0.1"
+
+    // Stream Quality States
+    private val bitratePresets = listOf(
+        20_000_000f to "20 Mbps (Light)",
+        35_000_000f to "35 Mbps (Standard)",
+        50_000_000f to "50 Mbps (Balanced)",
+        80_000_000f to "80 Mbps (Crisp)",
+        100_000_000f to "100 Mbps (Extreme)",
+        120_000_000f to "120 Mbps (Master)",
+        150_000_000f to "150 Mbps (Near-Lossless)",
+        200_000_000f to "200 Mbps (Max Peak)"
+    )
+    private var currentBitrateIdx = 2
+    private val resPresets = listOf(Pair(1920f, 1080f) to "1080p", Pair(1280f, 720f) to "720p", Pair(1600f, 900f) to "900p", Pair(2560f, 1440f) to "2K")
+    private var currentResIdx = 0
+    private val fpsPresets = listOf(60f to "60 FPS", 90f to "90 FPS (Smooth)", 120f to "120 FPS (Ultra Gaming)")
+    private var currentFpsIdx = 2
 
     // Edit Mode Overlay UI Elements
     private lateinit var editOverlay: FrameLayout
@@ -120,9 +149,40 @@ class MainActivity : Activity(), SensorEventListener {
 
         val root = FrameLayout(this)
 
-        // 1. Controller View
+        // 0. Hardware SurfaceView (PC Screen Video Layer)
+        surfaceView = SurfaceView(this).apply {
+            holder.setFormat(android.graphics.PixelFormat.OPAQUE)
+            holder.addCallback(object : SurfaceHolder.Callback {
+                override fun surfaceCreated(holder: SurfaceHolder) {
+                    if (currentHostIp.isNotEmpty()) {
+                        videoMirrorClient.start(currentHostIp)
+                    }
+                }
+                override fun surfaceDestroyed(holder: SurfaceHolder) {
+                    videoMirrorClient.stop()
+                }
+                override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {}
+            })
+        }
+        viewportManager = ViewportManager(this, surfaceView)
+        videoMirrorClient = VideoMirrorClient(surfaceView)
+        audioMirrorClient = AudioMirrorClient()
+        streamControlClient = StreamControlClient()
+
+        root.addView(
+            surfaceView,
+            FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT).apply {
+                gravity = Gravity.CENTER
+            }
+        )
+        viewportManager.applyAspectLayout(viewportManager.currentAspectMode)
+
+        // 1. Controller View (Transparent HUD Layer)
         controllerView = ControllerView(this)
         controllerView.hudOpacity = HudConfig.getHudOpacity(this)
+        controllerView.onViewportTouch = { ev ->
+            viewportManager.onTouchEvent(ev)
+        }
         controllerView.onStateChanged = { state -> networkClient.submit(state) }
         controllerView.onWheelScroll = { delta -> networkClient.sendScrollWheel(delta) }
         controllerView.onMiddleClick = { pressed -> networkClient.sendMacroKey("mouse_middle", pressed) }
@@ -153,17 +213,37 @@ class MainActivity : Activity(), SensorEventListener {
             FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
         )
 
-        // 2. Sleek Compact Gear Button (Top-Right)
+        // 2. Dual-Gear UI:
+        // Top-Left: Stream Gear (PCMirror Controls)
+        streamGearButton = Button(this).apply {
+            text = "⚙ STREAM"
+            textSize = 12f
+            paint.isFakeBoldText = true
+            setTextColor(Color.parseColor("#58A6FF"))
+            alpha = 0.85f
+            background = createCardDrawable(Color.parseColor("#880D1117"), 22f, Color.parseColor("#58A6FF"), 2)
+            setPadding(16, 0, 16, 0)
+            setOnClickListener { showStreamSettingsDialog() }
+        }
+        val streamGearParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, 80).apply {
+            gravity = Gravity.TOP or Gravity.START
+            topMargin = 16
+            leftMargin = 16
+        }
+        root.addView(streamGearButton, streamGearParams)
+
+        // Top-Right: Gamepad Gear (VirtualPad Controls)
         gearButton = Button(this).apply {
-            text = "⚙"
-            textSize = 20f
+            text = "⚙ PAD"
+            textSize = 12f
+            paint.isFakeBoldText = true
             setTextColor(Color.WHITE)
-            alpha = 0.7f
-            background = createCardDrawable(Color.parseColor("#440D1117"), 30f, Color.parseColor("#58A6FF"), 1)
-            setPadding(0, 0, 0, 0)
+            alpha = 0.85f
+            background = createCardDrawable(Color.parseColor("#880D1117"), 22f, Color.parseColor("#58A6FF"), 2)
+            setPadding(16, 0, 16, 0)
             setOnClickListener { showSettingsDialog() }
         }
-        val gearParams = FrameLayout.LayoutParams(90, 90).apply {
+        val gearParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, 80).apply {
             gravity = Gravity.TOP or Gravity.END
             topMargin = 16
             rightMargin = 16
@@ -175,6 +255,9 @@ class MainActivity : Activity(), SensorEventListener {
 
         // 4. Floating Live Recording Banner
         buildRecordingBanner(root)
+
+        // 5. Viewport Adjust Mode Overlay
+        buildViewportAdjustOverlay(root)
 
         setContentView(root)
         networkClient.start()
@@ -189,11 +272,24 @@ class MainActivity : Activity(), SensorEventListener {
         }
         val keymap = HudConfig.extractKeymap(controllerView.elements)
         networkClient.sendKeymapSync(keymap)
+        if (networkClient.mode == TransportMode.USB) {
+            networkClient.connectUsb()
+        }
+        if (viewportAdjustOverlay?.visibility != View.VISIBLE) {
+            controllerView.isAdjustingViewport = false
+        }
+        if (currentHostIp.isNotEmpty() && surfaceView.holder.surface.isValid) {
+            videoMirrorClient.start(currentHostIp)
+            audioMirrorClient.start(currentHostIp)
+            streamControlClient.start(currentHostIp)
+        }
     }
 
     override fun onPause() {
         super.onPause()
         sensorManager?.unregisterListener(this)
+        videoMirrorClient.stop()
+        audioMirrorClient.stop()
     }
 
     // -------------------------------------------------------------------
@@ -4189,7 +4285,7 @@ class MainActivity : Activity(), SensorEventListener {
     // Connection Target & Setup
     // -------------------------------------------------------------------
     private fun restoreSavedTargetOrPrompt() {
-        val savedMode = prefs.getString("mode", "WIFI")
+        val savedMode = prefs.getString("mode", "USB")
         val savedIp = prefs.getString("wifi_ip", "") ?: ""
 
         if (savedMode == "USB") {
@@ -4202,15 +4298,22 @@ class MainActivity : Activity(), SensorEventListener {
     }
 
     private fun switchToWifi(ip: String) {
+        currentHostIp = ip
         networkClient.mode = TransportMode.WIFI
         networkClient.setWifiTarget(ip)
         prefs.edit().putString("mode", "WIFI").putString("wifi_ip", ip).apply()
 
         val keymap = HudConfig.extractKeymap(controllerView.elements)
         networkClient.sendKeymapSync(keymap)
+
+        // Concurrently launch Video, Audio, and Stream Control
+        videoMirrorClient.start(ip)
+        audioMirrorClient.start(ip)
+        streamControlClient.start(ip)
     }
 
     private fun switchToUsb() {
+        currentHostIp = "127.0.0.1"
         networkClient.mode = TransportMode.USB
         prefs.edit().putString("mode", "USB").apply()
         val keymap = HudConfig.extractKeymap(controllerView.elements)
@@ -4219,12 +4322,17 @@ class MainActivity : Activity(), SensorEventListener {
             runOnUiThread {
                 Toast.makeText(
                     this,
-                    "USB connect failed - run 'adb reverse tcp:6001 tcp:6001' on the PC first",
+                    "USB connect failed - ensure VirtualPad PC server is running",
                     Toast.LENGTH_LONG
                 ).show()
             }
         }
         networkClient.sendKeymapSync(keymap)
+
+        // Concurrently launch Video, Audio, and Stream Control on USB localhost
+        videoMirrorClient.start("127.0.0.1")
+        audioMirrorClient.start("127.0.0.1")
+        streamControlClient.start("127.0.0.1")
     }
 
     /**
@@ -4592,6 +4700,376 @@ class MainActivity : Activity(), SensorEventListener {
 
     override fun onDestroy() {
         super.onDestroy()
+        videoMirrorClient.stop()
+        audioMirrorClient.stop()
+        streamControlClient.stop()
         networkClient.stop()
+    }
+
+    // -------------------------------------------------------------------
+    // PCMirror Stream Controls & Viewport Adjust Mode
+    // -------------------------------------------------------------------
+    private fun showStreamSettingsDialog() {
+        val scroll = ScrollView(this)
+        val layout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(40, 24, 40, 24)
+        }
+        scroll.addView(layout)
+
+        // Title
+        val titleView = TextView(this).apply {
+            text = "🖥️ PCMirror Stream Controls"
+            setTextColor(Color.parseColor("#58A6FF"))
+            textSize = 18f
+            paint.isFakeBoldText = true
+            setPadding(0, 0, 0, 4)
+        }
+        layout.addView(titleView)
+
+        val subView = TextView(this).apply {
+            text = "Adjust live video aspect ratio, stream bitrate, resolution, and viewport presets."
+            setTextColor(Color.parseColor("#8B949E"))
+            textSize = 12f
+            setPadding(0, 0, 0, 16)
+        }
+        layout.addView(subView)
+
+        // 1. Aspect Ratio Mode Switcher Button
+        val aspectModes = AspectRatioMode.values()
+        val aspectBtn = Button(this).apply {
+            text = "📐 Aspect Ratio: ${viewportManager.currentAspectMode.displayName}"
+            textSize = 14f
+            setTextColor(Color.WHITE)
+            background = createCardDrawable(Color.parseColor("#21262D"), 16f, Color.parseColor("#30363D"), 1)
+            setPadding(20, 16, 20, 16)
+            setOnClickListener {
+                val nextIdx = (aspectModes.indexOf(viewportManager.currentAspectMode) + 1) % aspectModes.size
+                val nextMode = aspectModes[nextIdx]
+                viewportManager.applyAspectLayout(nextMode)
+                text = "📐 Aspect Ratio: ${nextMode.displayName}"
+            }
+        }
+        layout.addView(aspectBtn, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+            bottomMargin = 12
+        })
+
+        // 2. Stream Quality / Bitrate Switcher Button
+        val bitrateBtn = Button(this).apply {
+            val currentPreset = bitratePresets[currentBitrateIdx]
+            text = "⚡ Stream Quality: ${currentPreset.second}"
+            textSize = 14f
+            setTextColor(Color.WHITE)
+            background = createCardDrawable(Color.parseColor("#21262D"), 16f, Color.parseColor("#30363D"), 1)
+            setPadding(20, 16, 20, 16)
+            setOnClickListener {
+                currentBitrateIdx = (currentBitrateIdx + 1) % bitratePresets.size
+                val preset = bitratePresets[currentBitrateIdx]
+                streamControlClient.setBitrate(preset.first)
+                text = "⚡ Stream Quality: ${preset.second}"
+            }
+        }
+        layout.addView(bitrateBtn, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+            bottomMargin = 12
+        })
+
+        // 3. Resolution Switcher Button
+        val resBtn = Button(this).apply {
+            val currentPreset = resPresets[currentResIdx]
+            text = "🖥️ Stream Resolution: ${currentPreset.second}"
+            textSize = 14f
+            setTextColor(Color.WHITE)
+            background = createCardDrawable(Color.parseColor("#21262D"), 16f, Color.parseColor("#30363D"), 1)
+            setPadding(20, 16, 20, 16)
+            setOnClickListener {
+                currentResIdx = (currentResIdx + 1) % resPresets.size
+                val preset = resPresets[currentResIdx]
+                streamControlClient.setResolution(preset.first.first, preset.first.second)
+                text = "🖥️ Stream Resolution: ${preset.second}"
+            }
+        }
+        layout.addView(resBtn, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+            bottomMargin = 12
+        })
+
+        // 4. Target FPS Button
+        val fpsBtn = Button(this).apply {
+            val currentPreset = fpsPresets[currentFpsIdx]
+            text = "🎯 Target FPS: ${currentPreset.second}"
+            textSize = 14f
+            setTextColor(Color.WHITE)
+            background = createCardDrawable(Color.parseColor("#21262D"), 16f, Color.parseColor("#30363D"), 1)
+            setPadding(20, 16, 20, 16)
+            setOnClickListener {
+                currentFpsIdx = (currentFpsIdx + 1) % fpsPresets.size
+                val preset = fpsPresets[currentFpsIdx]
+                streamControlClient.setFps(preset.first)
+                text = "🎯 Target FPS: ${preset.second}"
+            }
+        }
+        layout.addView(fpsBtn, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+            bottomMargin = 12
+        })
+
+        // 5. PC System Audio Switcher
+        val audioBtn = Button(this).apply {
+            val isEnabled = audioMirrorClient.isAudioEnabled
+            text = if (isEnabled) "🔊 PC System Audio: ON (Streaming)" else "🔇 PC System Audio: MUTED"
+            textSize = 14f
+            setTextColor(if (isEnabled) Color.parseColor("#3FB950") else Color.parseColor("#F85149"))
+            background = createCardDrawable(Color.parseColor("#21262D"), 16f, Color.parseColor("#30363D"), 1)
+            setPadding(20, 16, 20, 16)
+            setOnClickListener {
+                audioMirrorClient.isAudioEnabled = !audioMirrorClient.isAudioEnabled
+                if (audioMirrorClient.isAudioEnabled) {
+                    audioMirrorClient.start(currentHostIp)
+                    text = "🔊 PC System Audio: ON (Streaming)"
+                    setTextColor(Color.parseColor("#3FB950"))
+                } else {
+                    audioMirrorClient.stop()
+                    text = "🔇 PC System Audio: MUTED"
+                    setTextColor(Color.parseColor("#F85149"))
+                }
+            }
+        }
+        layout.addView(audioBtn, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+            bottomMargin = 12
+        })
+
+        // 6. Viewport Presets Row (Save & Manage)
+        val presetsRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+        }
+        val managePresetsBtn = Button(this).apply {
+            text = "📂 Manage Presets"
+            textSize = 13f
+            setTextColor(Color.WHITE)
+            background = createCardDrawable(Color.parseColor("#21262D"), 16f, Color.parseColor("#58A6FF"), 1)
+            setOnClickListener { showPresetsListDialog() }
+        }
+        val savePresetBtn = Button(this).apply {
+            text = "💾 Save Preset"
+            textSize = 13f
+            setTextColor(Color.WHITE)
+            background = createCardDrawable(Color.parseColor("#21262D"), 16f, Color.parseColor("#58A6FF"), 1)
+            setOnClickListener { showSavePresetDialog() }
+        }
+        presetsRow.addView(managePresetsBtn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = 8 })
+        presetsRow.addView(savePresetBtn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { leftMargin = 8 })
+        layout.addView(presetsRow, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+            bottomMargin = 16
+        })
+
+        // 7. Large Primary Action Button: "🖥️ ADJUST SCREEN VIEWPORT"
+        var dialog: AlertDialog? = null
+        val adjustScreenBtn = Button(this).apply {
+            text = "🖥️ ADJUST SCREEN VIEWPORT (Pinch & Pan)"
+            textSize = 14f
+            paint.isFakeBoldText = true
+            setTextColor(Color.WHITE)
+            background = createCardDrawable(Color.parseColor("#1F6FEB"), 16f, Color.parseColor("#58A6FF"), 2)
+            setPadding(20, 20, 20, 20)
+            setOnClickListener {
+                dialog?.dismiss()
+                enterViewportAdjustMode()
+            }
+        }
+        layout.addView(adjustScreenBtn, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+            bottomMargin = 8
+        })
+
+        dialog = AlertDialog.Builder(this)
+            .setView(scroll)
+            .setPositiveButton("Close", null)
+            .create()
+
+        dialog.window?.setBackgroundDrawable(ColorDrawable(Color.parseColor("#161B22")))
+        dialog.show()
+    }
+
+    private fun enterViewportAdjustMode() {
+        controllerView.isAdjustingViewport = true
+        viewportManager.isViewportLocked = false
+        viewportAdjustOverlay?.visibility = View.VISIBLE
+        streamGearButton.visibility = View.GONE
+        gearButton.visibility = View.GONE
+    }
+
+    private fun exitViewportAdjustMode() {
+        viewportManager.isViewportLocked = true
+        controllerView.isAdjustingViewport = false
+        viewportAdjustOverlay?.visibility = View.GONE
+        streamGearButton.visibility = View.VISIBLE
+        gearButton.visibility = View.VISIBLE
+        Toast.makeText(this, "🔒 Screen Viewport Locked for Gameplay", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun buildViewportAdjustOverlay(root: FrameLayout) {
+        val overlay = FrameLayout(this).apply {
+            visibility = View.GONE
+        }
+        viewportAdjustOverlay = overlay
+
+        // 1. Top banner
+        val topBanner = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            background = createCardDrawable(Color.parseColor("#DD0D1117"), 20f, Color.parseColor("#58A6FF"), 2)
+            setPadding(32, 12, 32, 12)
+        }
+        val topText = TextView(this).apply {
+            text = "🖥️ VIEWPORT TUNING: Pinch with 2 fingers to zoom • Drag to pan"
+            setTextColor(Color.parseColor("#58A6FF"))
+            textSize = 13f
+            paint.isFakeBoldText = true
+        }
+        topBanner.addView(topText)
+        val bannerParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT).apply {
+            gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+            topMargin = 16
+        }
+        overlay.addView(topBanner, bannerParams)
+
+        // 2. Bottom Glassmorphic Control Bar
+        val bottomBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = createCardDrawable(Color.parseColor("#EE0D1117"), 24f, Color.parseColor("#30363D"), 2)
+            setPadding(16, 10, 16, 10)
+        }
+
+        fun makeQuickBtn(title: String, onClick: () -> Unit): Button {
+            return Button(this).apply {
+                text = title
+                textSize = 11f
+                setTextColor(Color.WHITE)
+                background = createCardDrawable(Color.parseColor("#21262D"), 14f, Color.parseColor("#58A6FF"), 1)
+                setPadding(14, 8, 14, 8)
+                setOnClickListener { onClick() }
+            }
+        }
+
+        val btn169 = makeQuickBtn("16:9 Fit") { viewportManager.applyAspectLayout(AspectRatioMode.SAFE_FIT) }
+        val btnStretch = makeQuickBtn("Stretch") { viewportManager.applyAspectLayout(AspectRatioMode.FULL_STRETCH) }
+        val btnCrop = makeQuickBtn("Crop") { viewportManager.applyAspectLayout(AspectRatioMode.CROP_FILL) }
+        val btn219 = makeQuickBtn("21:9 Wide") { viewportManager.applyAspectLayout(AspectRatioMode.ULTRAWIDE) }
+        val btnCenter = makeQuickBtn("↺ Center") { viewportManager.resetViewport() }
+        val btnSave = makeQuickBtn("💾 Save") { showSavePresetDialog() }
+
+        val btnLock = Button(this).apply {
+            text = "✓ LOCK & PLAY"
+            textSize = 12f
+            paint.isFakeBoldText = true
+            setTextColor(Color.WHITE)
+            background = createCardDrawable(Color.parseColor("#238636"), 16f, Color.parseColor("#3FB950"), 2)
+            setPadding(20, 10, 20, 10)
+            setOnClickListener { exitViewportAdjustMode() }
+        }
+
+        bottomBar.addView(btn169)
+        bottomBar.addView(btnStretch)
+        bottomBar.addView(btnCrop)
+        bottomBar.addView(btn219)
+        bottomBar.addView(btnCenter)
+        bottomBar.addView(btnSave)
+        bottomBar.addView(btnLock)
+
+        for (i in 0 until bottomBar.childCount) {
+            val v = bottomBar.getChildAt(i)
+            (v.layoutParams as LinearLayout.LayoutParams).apply {
+                leftMargin = 4
+                rightMargin = 4
+            }
+        }
+
+        val barScroll = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            addView(bottomBar)
+        }
+
+        val barParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT).apply {
+            gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+            bottomMargin = 16
+        }
+        overlay.addView(barScroll, barParams)
+
+        root.addView(overlay, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+    }
+
+    private fun showSavePresetDialog() {
+        val input = EditText(this).apply {
+            hint = "Preset Name (e.g. RDR2 Centered)"
+            setHintTextColor(Color.parseColor("#8B949E"))
+            setTextColor(Color.WHITE)
+            background = createCardDrawable(Color.parseColor("#21262D"), 12f, Color.parseColor("#30363D"), 1)
+            setPadding(24, 16, 24, 16)
+        }
+        val layout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(40, 24, 40, 16)
+            addView(TextView(this@MainActivity).apply {
+                text = "💾 Save Viewport Preset"
+                setTextColor(Color.parseColor("#58A6FF"))
+                textSize = 16f
+                paint.isFakeBoldText = true
+                setPadding(0, 0, 0, 12)
+            })
+            addView(input)
+        }
+
+        AlertDialog.Builder(this)
+            .setView(layout)
+            .setPositiveButton("Save") { _, _ ->
+                val name = input.text.toString().trim().ifEmpty { "Preset ${System.currentTimeMillis() % 1000}" }
+                viewportManager.savePreset(name)
+                Toast.makeText(this, "Saved preset '$name'", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Cancel", null)
+            .create()
+            .apply {
+                window?.setBackgroundDrawable(ColorDrawable(Color.parseColor("#161B22")))
+                show()
+            }
+    }
+
+    private fun showPresetsListDialog() {
+        val presets = viewportManager.getSavedPresets()
+        if (presets.isEmpty()) {
+            Toast.makeText(this, "No saved custom presets yet. Use 'Save Preset' first.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val names = presets.map { "${it.name} (${it.aspectMode})" }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle("📂 Select Viewport Preset")
+            .setItems(names) { _, which ->
+                val chosen = presets[which]
+                viewportManager.applyPreset(chosen)
+                Toast.makeText(this, "Applied preset '${chosen.name}'", Toast.LENGTH_SHORT).show()
+            }
+            .setNeutralButton("Delete Preset") { _, _ ->
+                showDeletePresetDialog(presets)
+            }
+            .setNegativeButton("Close", null)
+            .create()
+            .apply {
+                window?.setBackgroundDrawable(ColorDrawable(Color.parseColor("#161B22")))
+                show()
+            }
+    }
+
+    private fun showDeletePresetDialog(presets: List<CustomAspectPreset>) {
+        val names = presets.map { it.name }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle("🗑️ Select Preset to Delete")
+            .setItems(names) { _, which ->
+                viewportManager.deletePreset(presets[which].id)
+                Toast.makeText(this, "Deleted preset '${presets[which].name}'", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Cancel", null)
+            .create()
+            .apply {
+                window?.setBackgroundDrawable(ColorDrawable(Color.parseColor("#161B22")))
+                show()
+            }
     }
 }

@@ -205,6 +205,34 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
             invalidate()
         }
 
+    var onViewportTouch: ((MotionEvent) -> Boolean)? = null
+    var isAdjustingViewport: Boolean = false
+        set(value) {
+            field = value
+            if (value) {
+                // Clear any held input when entering viewport adjust mode to avoid stuck keys on PC
+                pointerZone.clear()
+                buttonPointerLastX.clear()
+                buttonPointerLastY.clear()
+                buttonTouchStart.clear()
+                buttonTouchCurrent.clear()
+                latchedButtons.clear()
+                stopAllTurbo()
+                stopAllInstantTap()
+                isAutoRunLocked = false
+                isStickInLockNotch = false
+                autoShiftActive = false
+                dynamicStickOriginX = null
+                dynamicStickOriginY = null
+                lookPointerId = null
+                accumDx = 0f
+                accumDy = 0f
+                state = ControllerState()
+                emitState()
+            }
+            invalidate()
+        }
+
     var selectedElement: HudElement? = null
         private set
 
@@ -353,7 +381,10 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
     // Drawing
     // -------------------------------------------------------------------
     override fun onDraw(canvas: Canvas) {
-        canvas.drawColor(Color.parseColor("#0A0E1A"))
+        // Transparent background so live hardware-decoded PC video is 100% visible!
+        if (isEditMode) {
+            canvas.drawColor(Color.parseColor("#440A0E1A")) // Subtle translucent dark tint only in edit mode
+        }
         if (!layoutReady) return
 
         val W = width.toFloat()
@@ -371,8 +402,10 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
         textPaint.alpha = alpha255
         subTextPaint.alpha = (200 * alphaMultiplier).toInt().coerceIn(30, 255)
 
-        // Swipe zone hint (50/50 clean split down the middle across full height)
-        canvas.drawRect(W * 0.50f, 0f, W, H, swipeHintPaint)
+        // Only draw swipe zone guide in edit mode so gameplay screen is 100% unobstructed!
+        if (isEditMode) {
+            canvas.drawRect(W * 0.50f, 0f, W, H, swipeHintPaint)
+        }
 
         // Draw edit mode overlay grid & banner
         if (isEditMode) {
@@ -1239,6 +1272,9 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
     // Touch Events Handling
     // -------------------------------------------------------------------
     override fun onTouchEvent(event: MotionEvent): Boolean {
+        if (isAdjustingViewport) {
+            return onViewportTouch?.invoke(event) ?: false
+        }
         if (isRecordingMacro) {
             return handleGameplayTouchEvent(event)
         }

@@ -86,6 +86,7 @@ class NetworkClient {
     private var tcpOut: OutputStream? = null
 
     private val socketLock = Any()
+    private val reconnectSignal = java.lang.Object()
     // Pre-allocated 13-byte buffer: 2 bytes length prefix (11) + 11 bytes PACKET_SIZE payload
     private val usbPacketBuffer = ByteBuffer.allocate(13).order(ByteOrder.LITTLE_ENDIAN)
 
@@ -95,30 +96,29 @@ class NetworkClient {
     @Volatile private var lastSent = ControllerState()
     private val running = AtomicBoolean(false)
     private var heartbeatThread: Thread? = null
+    private var usbReconnectThread: Thread? = null
 
     @Volatile var activeKeymap: Map<String, String>? = null
+    @Volatile var isConnected: Boolean = false
+        private set
 
     fun connectUsb(onError: (Exception) -> Unit = {}) {
-        Thread {
+        mode = TransportMode.USB
+        triggerUsbReconnect()
+    }
+
+    fun triggerUsbReconnect() {
+        disconnectUsb()
+        synchronized(reconnectSignal) {
             try {
-                disconnectUsb()
-                val s = Socket("127.0.0.1", port)
-                s.tcpNoDelay = true // disable Nagle's algorithm - send immediately
-                s.sendBufferSize = 1024 // reduce kernel socket buffer to minimize queued packet delay
-                val out = s.getOutputStream()
-                synchronized(socketLock) {
-                    tcpSocket = s
-                    tcpOut = out
-                }
-                activeKeymap?.let { sendKeymapSync(it) }
-            } catch (e: Exception) {
-                onError(e)
-            }
-        }.start()
+                reconnectSignal.notifyAll()
+            } catch (_: Exception) {}
+        }
     }
 
     fun disconnectUsb() {
         synchronized(socketLock) {
+            isConnected = false
             try { tcpOut?.close() } catch (_: Exception) {}
             try { tcpSocket?.close() } catch (_: Exception) {}
             tcpOut = null
@@ -142,6 +142,49 @@ class NetworkClient {
 
     fun start() {
         if (running.getAndSet(true)) return
+
+        // 1. Dedicated USB Auto-Reconnect Daemon: keeps port 6001 connected 100% of the time
+        usbReconnectThread = Thread {
+            while (running.get()) {
+                if (mode == TransportMode.USB) {
+                    val needsConnect = synchronized(socketLock) {
+                        tcpSocket == null || !tcpSocket!!.isConnected || tcpSocket!!.isClosed
+                    }
+                    if (needsConnect) {
+                        try {
+                            val s = Socket()
+                            s.tcpNoDelay = true
+                            s.sendBufferSize = 1024
+                            s.connect(java.net.InetSocketAddress("127.0.0.1", port), 1200)
+                            val out = s.getOutputStream()
+                            synchronized(socketLock) {
+                                tcpSocket = s
+                                tcpOut = out
+                                isConnected = true
+                            }
+                            android.util.Log.i("NetworkClient", "[NetworkClient] USB connected to 127.0.0.1:$port")
+                            activeKeymap?.let { sendKeymapSync(it) }
+                        } catch (e: Exception) {
+                            disconnectUsb()
+                        }
+                    }
+                }
+
+                try {
+                    synchronized(reconnectSignal) {
+                        reconnectSignal.wait(1000)
+                    }
+                } catch (_: InterruptedException) {
+                    break
+                } catch (_: Exception) {}
+            }
+        }.apply {
+            isDaemon = true
+            name = "NetworkClient-USB-Reconnect"
+            start()
+        }
+
+        // 2. Continuous Input Heartbeat (resend button holds & stick positions)
         heartbeatThread = Thread {
             while (running.get()) {
                 try {
@@ -166,6 +209,10 @@ class NetworkClient {
     fun stop() {
         running.set(false)
         heartbeatThread?.interrupt()
+        synchronized(reconnectSignal) {
+            try { reconnectSignal.notifyAll() } catch (_: Exception) {}
+        }
+        usbReconnectThread?.interrupt()
         disconnectUsb()
         try { sendExecutor.shutdownNow() } catch (_: Exception) {}
     }
@@ -175,7 +222,7 @@ class NetworkClient {
      * Bypasses heap allocation and SingleThreadExecutor queue for zero latency.
      */
     private fun writeUsbStateDirect(state: ControllerState) {
-        val out = tcpOut ?: return
+        val out = synchronized(socketLock) { tcpOut } ?: return
         synchronized(socketLock) {
             try {
                 usbPacketBuffer.clear()
@@ -188,8 +235,9 @@ class NetworkClient {
                 usbPacketBuffer.putShort(state.mouseDy.coerceIn(-32000, 32000).toShort())
                 out.write(usbPacketBuffer.array(), 0, 13)
                 out.flush()
-            } catch (_: Exception) {
-                // Ignore transient socket write errors
+            } catch (e: Exception) {
+                android.util.Log.e("NetworkClient", "USB write failed, triggering reconnect: ${e.message}")
+                triggerUsbReconnect()
             }
         }
     }
@@ -243,8 +291,9 @@ class NetworkClient {
         sendExecutor.execute {
             try {
                 if (mode == TransportMode.USB) {
-                    for (attempt in 0 until 10) {
-                        if (tcpOut != null) {
+                    for (attempt in 0 until 15) {
+                        val hasOut = synchronized(socketLock) { tcpOut != null }
+                        if (hasOut) {
                             sendRaw(packet)
                             break
                         }
@@ -296,7 +345,7 @@ class NetworkClient {
                 udpSocket.send(DatagramPacket(bytes, bytes.size, addr, port))
             }
             TransportMode.USB -> {
-                val out = tcpOut ?: return
+                val out = synchronized(socketLock) { tcpOut } ?: return
                 synchronized(socketLock) {
                     try {
                         // Frame with 2-byte little-endian length prefix for TCP
@@ -305,7 +354,10 @@ class NetworkClient {
                         framed.put(bytes)
                         out.write(framed.array())
                         out.flush()
-                    } catch (_: Exception) {}
+                    } catch (e: Exception) {
+                        android.util.Log.e("NetworkClient", "USB sendRaw failed, triggering reconnect: ${e.message}")
+                        triggerUsbReconnect()
+                    }
                 }
             }
         }

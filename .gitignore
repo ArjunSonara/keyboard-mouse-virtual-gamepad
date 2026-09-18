@@ -22,3 +22,9 @@ dist/
 # Windows
 Thumbs.db
 desktop.ini
+
+# Antigravity & Local Memory Bank
+.antigravityrules
+antigravity-memory-bank/
+memory-bank/
+*.png
