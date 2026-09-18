@@ -584,6 +584,41 @@ def start_pcmirror_daemon():
     except Exception as e:
         print(f"[ERROR] Failed to start PCMirror: {e}")
 
+def stop_pcmirror_daemon():
+    global pcmirror_process
+    if pcmirror_process:
+        try:
+            pcmirror_process.terminate()
+            pcmirror_process.wait(timeout=1)
+        except Exception:
+            pass
+        pcmirror_process = None
+    try:
+        silent_run(["taskkill", "/F", "/IM", "PCMirror.exe", "/T"], capture_output=True, timeout=2)
+    except Exception:
+        pass
+    print("[INFO] PCMirror native engine stopped.")
+
+def toggle_pcmirror_daemon():
+    global pcmirror_process
+    is_running = False
+    if pcmirror_process and pcmirror_process.poll() is None:
+        is_running = True
+    else:
+        try:
+            r = silent_run(["tasklist", "/FI", "IMAGENAME eq PCMirror.exe"], capture_output=True, text=True, timeout=2)
+            if "PCMirror.exe" in r.stdout:
+                is_running = True
+        except Exception:
+            pass
+
+    if is_running:
+        stop_pcmirror_daemon()
+        return False
+    else:
+        start_pcmirror_daemon()
+        return True
+
 def auto_adb_reverse():
     global usb_status_str, _last_reversed_devices
     adb_bin = get_adb_bin()
@@ -695,7 +730,7 @@ def main():
     # Modern Dark GUI Window
     root = tk.Tk()
     root.title("VirtualPad Console Server (Hybrid)")
-    root.geometry("460x610")
+    root.geometry("460x650")
     root.configure(bg="#0D1117")
     root.resizable(False, False)
 
@@ -745,28 +780,56 @@ def main():
         root, text=f"Status: {connection_status}", font=("Segoe UI", 10, "italic"),
         fg="#E6EDF3", bg="#0D1117"
     )
-    conn_label.pack(pady=(4, 12))
+    conn_label.pack(pady=(4, 8))
+
+    # Screen Mirroring Control Card
+    mirror_card = tk.Frame(root, bg="#161B22", padx=12, pady=8, highlightbackground="#30363D", highlightthickness=1)
+    mirror_card.pack(fill="x", padx=20, pady=(0, 10))
+
+    mirror_status_var = tk.StringVar(value="🖥️ Screen Mirror: ACTIVE")
+    mirror_status_label = tk.Label(
+        mirror_card, textvariable=mirror_status_var, font=("Segoe UI", 9, "bold"),
+        fg="#3FB950", bg="#161B22"
+    )
+    mirror_status_label.pack(side="left", padx=4)
+
+    def on_toggle_mirror():
+        active = toggle_pcmirror_daemon()
+        if active:
+            mirror_status_var.set("🖥️ Screen Mirror: ACTIVE")
+            mirror_status_label.config(fg="#3FB950")
+            btn_toggle_mirror.config(text="Turn OFF", bg="#21262D", fg="#F85149")
+        else:
+            mirror_status_var.set("⚡ Pure Gamepad: OFF (0% CPU/GPU)")
+            mirror_status_label.config(fg="#E3B341")
+            btn_toggle_mirror.config(text="Turn ON", bg="#238636", fg="#FFFFFF")
+
+    btn_toggle_mirror = tk.Button(
+        mirror_card, text="Turn OFF", font=("Segoe UI", 8, "bold"),
+        bg="#21262D", fg="#F85149", relief="flat", padx=10, pady=2,
+        command=on_toggle_mirror, cursor="hand2"
+    )
+    btn_toggle_mirror.pack(side="right", padx=4)
 
     def update_gui_loop():
         conn_label.config(text=f"Status: {connection_status}")
         usb_label.config(text=usb_status_str)
+        is_alive = pcmirror_process is not None and pcmirror_process.poll() is None
+        if is_alive:
+            mirror_status_var.set("🖥️ Screen Mirror: ACTIVE")
+            mirror_status_label.config(fg="#3FB950")
+            btn_toggle_mirror.config(text="Turn OFF", bg="#21262D", fg="#F85149")
+        else:
+            mirror_status_var.set("⚡ Pure Gamepad: OFF (0% CPU/GPU)")
+            mirror_status_label.config(fg="#E3B341")
+            btn_toggle_mirror.config(text="Turn ON", bg="#238636", fg="#FFFFFF")
         root.after(1000, update_gui_loop)
 
     root.after(1000, update_gui_loop)
 
     def on_exit():
-        global pcmirror_process
         release_everything()
-        if pcmirror_process:
-            try:
-                pcmirror_process.terminate()
-            except Exception:
-                pass
-            pcmirror_process = None
-        try:
-            silent_run(["taskkill", "/F", "/IM", "PCMirror.exe", "/T"], capture_output=True, timeout=2)
-        except Exception:
-            pass
+        stop_pcmirror_daemon()
         root.destroy()
 
     root.protocol("WM_DELETE_WINDOW", on_exit)

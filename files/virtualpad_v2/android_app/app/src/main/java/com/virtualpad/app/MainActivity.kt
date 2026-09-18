@@ -64,6 +64,7 @@ class MainActivity : Activity(), SensorEventListener {
     private lateinit var streamGearButton: Button
     private var viewportAdjustOverlay: FrameLayout? = null
     private var currentHostIp: String = "127.0.0.1"
+    private var isMirroringEnabled: Boolean = true
 
     // Stream Quality States
     private val bitratePresets = listOf(
@@ -140,6 +141,7 @@ class MainActivity : Activity(), SensorEventListener {
         )
 
         prefs = getSharedPreferences("virtualpad", Context.MODE_PRIVATE)
+        isMirroringEnabled = prefs.getBoolean("mirroring_enabled", true)
         networkClient = NetworkClient()
 
         // Initialize Gyroscope
@@ -154,7 +156,7 @@ class MainActivity : Activity(), SensorEventListener {
             holder.setFormat(android.graphics.PixelFormat.OPAQUE)
             holder.addCallback(object : SurfaceHolder.Callback {
                 override fun surfaceCreated(holder: SurfaceHolder) {
-                    if (currentHostIp.isNotEmpty()) {
+                    if (isMirroringEnabled && currentHostIp.isNotEmpty()) {
                         videoMirrorClient.start(currentHostIp)
                     }
                 }
@@ -175,6 +177,9 @@ class MainActivity : Activity(), SensorEventListener {
                 gravity = Gravity.CENTER
             }
         )
+        if (!isMirroringEnabled) {
+            surfaceView.visibility = View.GONE
+        }
         viewportManager.applyAspectLayout(viewportManager.currentAspectMode)
 
         // 1. Controller View (Transparent HUD Layer)
@@ -216,15 +221,13 @@ class MainActivity : Activity(), SensorEventListener {
         // 2. Dual-Gear UI:
         // Top-Left: Stream Gear (PCMirror Controls)
         streamGearButton = Button(this).apply {
-            text = "⚙ STREAM"
             textSize = 12f
             paint.isFakeBoldText = true
-            setTextColor(Color.parseColor("#58A6FF"))
             alpha = 0.85f
-            background = createCardDrawable(Color.parseColor("#880D1117"), 22f, Color.parseColor("#58A6FF"), 2)
             setPadding(16, 0, 16, 0)
             setOnClickListener { showStreamSettingsDialog() }
         }
+        updateStreamGearButtonState()
         val streamGearParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, 80).apply {
             gravity = Gravity.TOP or Gravity.START
             topMargin = 16
@@ -278,7 +281,7 @@ class MainActivity : Activity(), SensorEventListener {
         if (viewportAdjustOverlay?.visibility != View.VISIBLE) {
             controllerView.isAdjustingViewport = false
         }
-        if (currentHostIp.isNotEmpty() && surfaceView.holder.surface.isValid) {
+        if (isMirroringEnabled && currentHostIp.isNotEmpty() && surfaceView.holder.surface.isValid) {
             videoMirrorClient.start(currentHostIp)
             audioMirrorClient.start(currentHostIp)
             streamControlClient.start(currentHostIp)
@@ -288,8 +291,10 @@ class MainActivity : Activity(), SensorEventListener {
     override fun onPause() {
         super.onPause()
         sensorManager?.unregisterListener(this)
-        videoMirrorClient.stop()
-        audioMirrorClient.stop()
+        if (isMirroringEnabled) {
+            videoMirrorClient.stop()
+            audioMirrorClient.stop()
+        }
     }
 
     // -------------------------------------------------------------------
@@ -386,6 +391,41 @@ class MainActivity : Activity(), SensorEventListener {
         }
     }
 
+    private fun updateStreamGearButtonState() {
+        if (isMirroringEnabled) {
+            streamGearButton.text = "⚙ STREAM"
+            streamGearButton.setTextColor(Color.parseColor("#58A6FF"))
+            streamGearButton.background = createCardDrawable(Color.parseColor("#880D1117"), 22f, Color.parseColor("#58A6FF"), 2)
+        } else {
+            streamGearButton.text = "⚡ PURE PAD"
+            streamGearButton.setTextColor(Color.parseColor("#3FB950"))
+            streamGearButton.background = createCardDrawable(Color.parseColor("#880D1117"), 22f, Color.parseColor("#3FB950"), 2)
+        }
+    }
+
+    private fun setMirroringEnabled(enabled: Boolean) {
+        if (isMirroringEnabled == enabled) return
+        isMirroringEnabled = enabled
+        prefs.edit().putBoolean("mirroring_enabled", enabled).apply()
+        updateStreamGearButtonState()
+
+        if (enabled) {
+            surfaceView.visibility = View.VISIBLE
+            if (currentHostIp.isNotEmpty()) {
+                videoMirrorClient.start(currentHostIp)
+                audioMirrorClient.start(currentHostIp)
+                streamControlClient.start(currentHostIp)
+            }
+            Toast.makeText(this, "Screen Mirroring ENABLED", Toast.LENGTH_SHORT).show()
+        } else {
+            videoMirrorClient.stop()
+            audioMirrorClient.stop()
+            streamControlClient.stop()
+            surfaceView.visibility = View.GONE
+            Toast.makeText(this, "Pure Gamepad Mode: Mirroring DISABLED (0% PC load)", Toast.LENGTH_SHORT).show()
+        }
+    }
+
     private fun formatKeyDisplay(key: String): String = when (key.lowercase()) {
         "mouse_left", "lmb" -> "LMB"
         "mouse_right", "rmb" -> "RMB"
@@ -442,6 +482,44 @@ class MainActivity : Activity(), SensorEventListener {
         }
         actionsRow.addView(connSetupBtn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
         layout.addView(actionsRow)
+
+        // Section: Screen Mirroring Toggle
+        val mirrorCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = createCardDrawable(Color.parseColor("#161B22"), 14f)
+            setPadding(24, 20, 24, 20)
+        }
+        val mirrorHeader = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val mirrorTitle = TextView(this).apply {
+            text = "🖥️ Screen Mirroring"
+            setTextColor(Color.parseColor("#58A6FF"))
+            textSize = 14f
+            paint.isFakeBoldText = true
+        }
+        mirrorHeader.addView(mirrorTitle, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+
+        val mirrorSwitch = Switch(this).apply {
+            isChecked = isMirroringEnabled
+            setOnCheckedChangeListener { _, isChecked ->
+                setMirroringEnabled(isChecked)
+            }
+        }
+        mirrorHeader.addView(mirrorSwitch)
+        mirrorCard.addView(mirrorHeader)
+
+        val mirrorDesc = TextView(this).apply {
+            text = "Turn OFF to disable video/audio streaming and run as pure gamepad (0% PC CPU/GPU load). Turn ON to stream PC display to phone."
+            setTextColor(Color.parseColor("#8B949E"))
+            textSize = 12f
+            setPadding(0, 6, 0, 0)
+        }
+        mirrorCard.addView(mirrorDesc)
+        layout.addView(mirrorCard, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+            bottomMargin = 16
+        })
 
         // Section: Touch Optimization & Multi-Touch Booster
         val touchOptCard = LinearLayout(this).apply {
@@ -4306,10 +4384,12 @@ class MainActivity : Activity(), SensorEventListener {
         val keymap = HudConfig.extractKeymap(controllerView.elements)
         networkClient.sendKeymapSync(keymap)
 
-        // Concurrently launch Video, Audio, and Stream Control
-        videoMirrorClient.start(ip)
-        audioMirrorClient.start(ip)
-        streamControlClient.start(ip)
+        // Concurrently launch Video, Audio, and Stream Control if mirroring enabled
+        if (isMirroringEnabled) {
+            videoMirrorClient.start(ip)
+            audioMirrorClient.start(ip)
+            streamControlClient.start(ip)
+        }
     }
 
     private fun switchToUsb() {
@@ -4329,10 +4409,12 @@ class MainActivity : Activity(), SensorEventListener {
         }
         networkClient.sendKeymapSync(keymap)
 
-        // Concurrently launch Video, Audio, and Stream Control on USB localhost
-        videoMirrorClient.start("127.0.0.1")
-        audioMirrorClient.start("127.0.0.1")
-        streamControlClient.start("127.0.0.1")
+        // Concurrently launch Video, Audio, and Stream Control on USB localhost if mirroring enabled
+        if (isMirroringEnabled) {
+            videoMirrorClient.start("127.0.0.1")
+            audioMirrorClient.start("127.0.0.1")
+            streamControlClient.start("127.0.0.1")
+        }
     }
 
     /**
@@ -4700,9 +4782,11 @@ class MainActivity : Activity(), SensorEventListener {
 
     override fun onDestroy() {
         super.onDestroy()
-        videoMirrorClient.stop()
-        audioMirrorClient.stop()
-        streamControlClient.stop()
+        if (isMirroringEnabled) {
+            videoMirrorClient.stop()
+            audioMirrorClient.stop()
+            streamControlClient.stop()
+        }
         networkClient.stop()
     }
 
@@ -4735,6 +4819,90 @@ class MainActivity : Activity(), SensorEventListener {
         }
         layout.addView(subView)
 
+        // Master Mirroring Toggle Card
+        val masterToggleCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = createCardDrawable(
+                if (isMirroringEnabled) Color.parseColor("#161B22") else Color.parseColor("#1C2128"),
+                16f,
+                if (isMirroringEnabled) Color.parseColor("#238636") else Color.parseColor("#484F58"),
+                2
+            )
+            setPadding(24, 20, 24, 20)
+        }
+
+        val toggleHeader = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+
+        val toggleTitleLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        }
+
+        val toggleTitle = TextView(this).apply {
+            text = if (isMirroringEnabled) "🖥️ Screen Mirroring: ACTIVE" else "⚡ Pure Gamepad Mode (Mirror OFF)"
+            setTextColor(if (isMirroringEnabled) Color.parseColor("#3FB950") else Color.parseColor("#E6EDF3"))
+            textSize = 15f
+            paint.isFakeBoldText = true
+        }
+
+        val toggleDesc = TextView(this).apply {
+            text = if (isMirroringEnabled)
+                "Streaming live PC video & audio to phone. Toggle OFF for 0% PC CPU/GPU load."
+            else
+                "Mirroring stopped. Phone functions as a pure USB gamepad/keyboard/mouse controller."
+            setTextColor(Color.parseColor("#8B949E"))
+            textSize = 12f
+            setPadding(0, 4, 0, 0)
+        }
+
+        toggleTitleLayout.addView(toggleTitle)
+        toggleTitleLayout.addView(toggleDesc)
+        toggleHeader.addView(toggleTitleLayout)
+
+        val streamControlsContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+
+        fun setContainerEnabled(container: ViewGroup, enabled: Boolean) {
+            container.alpha = if (enabled) 1.0f else 0.35f
+            for (i in 0 until container.childCount) {
+                val child = container.getChildAt(i)
+                child.isEnabled = enabled
+                if (child is ViewGroup) {
+                    setContainerEnabled(child, enabled)
+                }
+            }
+        }
+
+        val toggleSwitch = Switch(this).apply {
+            isChecked = isMirroringEnabled
+            setOnCheckedChangeListener { _, isChecked ->
+                setMirroringEnabled(isChecked)
+                toggleTitle.text = if (isChecked) "🖥️ Screen Mirroring: ACTIVE" else "⚡ Pure Gamepad Mode (Mirror OFF)"
+                toggleTitle.setTextColor(if (isChecked) Color.parseColor("#3FB950") else Color.parseColor("#E6EDF3"))
+                toggleDesc.text = if (isChecked)
+                    "Streaming live PC video & audio to phone. Toggle OFF for 0% PC CPU/GPU load."
+                else
+                    "Mirroring stopped. Phone functions as a pure USB gamepad/keyboard/mouse controller."
+                masterToggleCard.background = createCardDrawable(
+                    if (isChecked) Color.parseColor("#161B22") else Color.parseColor("#1C2128"),
+                    16f,
+                    if (isChecked) Color.parseColor("#238636") else Color.parseColor("#484F58"),
+                    2
+                )
+                setContainerEnabled(streamControlsContainer, isChecked)
+            }
+        }
+        toggleHeader.addView(toggleSwitch)
+        masterToggleCard.addView(toggleHeader)
+
+        layout.addView(masterToggleCard, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+            bottomMargin = 16
+        })
+
         // 1. Aspect Ratio Mode Switcher Button
         val aspectModes = AspectRatioMode.values()
         val aspectBtn = Button(this).apply {
@@ -4750,7 +4918,7 @@ class MainActivity : Activity(), SensorEventListener {
                 text = "📐 Aspect Ratio: ${nextMode.displayName}"
             }
         }
-        layout.addView(aspectBtn, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+        streamControlsContainer.addView(aspectBtn, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
             bottomMargin = 12
         })
 
@@ -4769,7 +4937,7 @@ class MainActivity : Activity(), SensorEventListener {
                 text = "⚡ Stream Quality: ${preset.second}"
             }
         }
-        layout.addView(bitrateBtn, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+        streamControlsContainer.addView(bitrateBtn, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
             bottomMargin = 12
         })
 
@@ -4788,7 +4956,7 @@ class MainActivity : Activity(), SensorEventListener {
                 text = "🖥️ Stream Resolution: ${preset.second}"
             }
         }
-        layout.addView(resBtn, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+        streamControlsContainer.addView(resBtn, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
             bottomMargin = 12
         })
 
@@ -4807,7 +4975,7 @@ class MainActivity : Activity(), SensorEventListener {
                 text = "🎯 Target FPS: ${preset.second}"
             }
         }
-        layout.addView(fpsBtn, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+        streamControlsContainer.addView(fpsBtn, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
             bottomMargin = 12
         })
 
@@ -4832,7 +5000,7 @@ class MainActivity : Activity(), SensorEventListener {
                 }
             }
         }
-        layout.addView(audioBtn, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+        streamControlsContainer.addView(audioBtn, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
             bottomMargin = 12
         })
 
@@ -4856,7 +5024,7 @@ class MainActivity : Activity(), SensorEventListener {
         }
         presetsRow.addView(managePresetsBtn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = 8 })
         presetsRow.addView(savePresetBtn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { leftMargin = 8 })
-        layout.addView(presetsRow, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+        streamControlsContainer.addView(presetsRow, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
             bottomMargin = 16
         })
 
@@ -4874,9 +5042,14 @@ class MainActivity : Activity(), SensorEventListener {
                 enterViewportAdjustMode()
             }
         }
-        layout.addView(adjustScreenBtn, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+        streamControlsContainer.addView(adjustScreenBtn, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
             bottomMargin = 8
         })
+
+        layout.addView(streamControlsContainer)
+        if (!isMirroringEnabled) {
+            setContainerEnabled(streamControlsContainer, false)
+        }
 
         dialog = AlertDialog.Builder(this)
             .setView(scroll)
