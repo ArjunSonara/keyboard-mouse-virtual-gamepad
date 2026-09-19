@@ -469,7 +469,10 @@ def get_adb_bin():
         _cached_adb_bin = adb_which
         return _cached_adb_bin
 
+    exe_dir = os.path.dirname(os.path.abspath(sys.executable))
     candidates = [
+        os.path.join(exe_dir, "adb.exe"),
+        os.path.join(exe_dir, "platform-tools", "adb.exe"),
         r"C:\Users\arjun\Downloads\platform-tools-latest-windows\platform-tools\adb.exe",
         r"C:\Users\arjun\AppData\Local\Android\Sdk\platform-tools\adb.exe",
         os.path.expandvars(r"%LOCALAPPDATA%\Android\Sdk\platform-tools\adb.exe"),
@@ -546,9 +549,10 @@ def assign_process_to_job(proc):
             print(f"[WARN] Could not assign process to Job Object: {e}")
 
 def get_pcmirror_bin():
-    # Check PyInstaller bundle dir, script dir, or workspace root
+    # Check PyInstaller bundle dir, exe dir, script dir, or workspace root
     base_dirs = [
         getattr(sys, "_MEIPASS", ""),
+        os.path.dirname(os.path.abspath(sys.executable)),
         os.path.dirname(os.path.abspath(__file__)),
         os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")),
         os.getcwd(),
@@ -575,9 +579,9 @@ def start_pcmirror_daemon():
         return
 
     try:
-        # Args: <port> <width> <height> <fps> <bitrate>
-        # 8080 0 0 60 35000000 (0 0 auto-detects native screen resolution)
-        cmd = [pcmirror_bin, "8080", "0", "0", "60", "35000000"]
+        # Args: <port> <width> <height> <fps> <bitrate> [--no-adb-watcher]
+        # 8080 0 0 60 80000000 (0 0 auto-detects native screen resolution)
+        cmd = [pcmirror_bin, "8080", "0", "0", "60", "80000000", "--no-adb-watcher"]
         pcmirror_process = silent_popen(cmd, cwd=os.path.dirname(pcmirror_bin))
         assign_process_to_job(pcmirror_process)
         print(f"[INFO] PCMirror native engine started (PID: {pcmirror_process.pid})")
@@ -628,38 +632,35 @@ def auto_adb_reverse():
         return
 
     try:
-        # Give enough timeout (10s) for cold ADB daemon startup
-        r = silent_run([adb_bin, "devices"], capture_output=True, text=True, timeout=10)
-        lines = r.stdout.splitlines()
+        r = silent_run([adb_bin, "devices"], capture_output=True, text=True, timeout=6)
+        lines = r.stdout.splitlines() if r.returncode == 0 else []
         devs = set([line.split("\t")[0].strip() for line in lines if "\tdevice" in line])
         unauthorized = any("\tunauthorized" in line for line in lines)
 
         if unauthorized and not devs:
             usb_status_str = "⚠️ Phone unauthorized: Tap 'Allow USB debugging' on phone"
+            _last_reversed_devices.clear()
             return
 
         if devs:
-            # Query actual reverse forwarding list on device
-            rev_list = silent_run([adb_bin, "reverse", "--list"], capture_output=True, text=True, timeout=5)
-            rev_output = rev_list.stdout or ""
-            missing_ports = [p for p in REVERSE_PORTS if f"tcp:{p}" not in rev_output]
-
-            if missing_ports or devs != _last_reversed_devices:
-                all_ok = True
-                for p in REVERSE_PORTS:
-                    rev = silent_run([adb_bin, "reverse", f"tcp:{p}", f"tcp:{p}"], capture_output=True, text=True, timeout=8)
-                    if rev.returncode != 0:
-                        all_ok = False
-                if all_ok:
-                    _last_reversed_devices = devs
-                    usb_status_str = f"🟢 USB Ready: All 4 ports routed ({len(devs)} device connected)"
-                    return
-                else:
-                    usb_status_str = f"⚠️ ADB reverse partial/failed on some ports"
-                    return
-            else:
+            # If the same devices are connected and were already reversed, maintain status without re-running ADB
+            if devs == _last_reversed_devices:
                 usb_status_str = f"🟢 USB Ready: All 4 ports routed ({len(devs)} device connected)"
                 return
+
+            all_ok = True
+            for p in REVERSE_PORTS:
+                rev = silent_run([adb_bin, "reverse", f"tcp:{p}", f"tcp:{p}"], capture_output=True, text=True, timeout=5)
+                if rev.returncode != 0:
+                    all_ok = False
+
+            if all_ok:
+                _last_reversed_devices = set(devs)
+                usb_status_str = f"🟢 USB Ready: All 4 ports routed ({len(devs)} device connected)"
+            else:
+                usb_status_str = "⚠️ ADB reverse partial/failed on some ports"
+            return
+
         _last_reversed_devices.clear()
         usb_status_str = "⚪ USB: Plug in phone with USB Debugging enabled"
     except Exception as e:
@@ -669,9 +670,9 @@ def _usb_watcher_loop():
     while True:
         try:
             auto_adb_reverse()
-            time.sleep(3)
+            time.sleep(5)
         except Exception:
-            time.sleep(3)
+            time.sleep(5)
 
 def get_local_ip():
     adapters = {}

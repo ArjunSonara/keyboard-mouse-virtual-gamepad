@@ -23,23 +23,29 @@ class StreamControlClient {
     private var socket: Socket? = null
     private var outputStream: OutputStream? = null
     @Volatile private var isConnected = false
+    @Volatile private var hostIp: String = "127.0.0.1"
 
     fun start(host: String) {
+        hostIp = host
         executor.execute {
-            try {
-                disconnectInternal()
-                val s = Socket().apply {
-                    connect(InetSocketAddress(host, CONTROL_PORT), 3000)
-                    tcpNoDelay = true
-                }
-                socket = s
-                outputStream = s.getOutputStream()
-                isConnected = true
-                Log.i(TAG, "Connected to stream control channel on $host:$CONTROL_PORT")
-            } catch (e: Exception) {
-                Log.w(TAG, "Stream control connection error: ${e.message}")
-                isConnected = false
+            connectInternal()
+        }
+    }
+
+    private fun connectInternal() {
+        try {
+            disconnectInternal()
+            val s = Socket().apply {
+                connect(InetSocketAddress(hostIp, CONTROL_PORT), 3000)
+                tcpNoDelay = true
             }
+            socket = s
+            outputStream = s.getOutputStream()
+            isConnected = true
+            Log.i(TAG, "Connected to stream control channel on $hostIp:$CONTROL_PORT")
+        } catch (e: Exception) {
+            Log.w(TAG, "Stream control connection error: ${e.message}")
+            isConnected = false
         }
     }
 
@@ -59,6 +65,9 @@ class StreamControlClient {
 
     private fun sendPacket(type: Byte, p1: Float, p2: Float) {
         executor.execute {
+            if (!isConnected || socket == null || socket?.isClosed == true || outputStream == null) {
+                connectInternal()
+            }
             val out = outputStream ?: return@execute
             try {
                 val buf = ByteBuffer.allocate(9).order(ByteOrder.LITTLE_ENDIAN)
@@ -69,7 +78,8 @@ class StreamControlClient {
                 out.flush()
                 Log.d(TAG, "Sent control packet: type=$type, p1=$p1, p2=$p2")
             } catch (e: Exception) {
-                Log.w(TAG, "Failed to send control packet: ${e.message}")
+                Log.w(TAG, "Failed to send control packet: ${e.message}, reconnecting...")
+                disconnectInternal()
             }
         }
     }

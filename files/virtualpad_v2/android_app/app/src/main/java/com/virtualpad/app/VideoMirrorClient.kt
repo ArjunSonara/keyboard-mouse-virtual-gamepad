@@ -12,6 +12,7 @@ import java.net.InetSocketAddress
 import java.net.Socket
 import java.nio.ByteBuffer
 import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.TimeUnit
 
 /**
  * Ultra-low latency H.264 video decoding client over TCP port 8080.
@@ -35,6 +36,7 @@ class VideoMirrorClient(private val surfaceView: SurfaceView) {
 
     var onResolutionDetected: ((Int, Int) -> Unit)? = null
     var onStreamStateChanged: ((Boolean, String?) -> Unit)? = null
+    var onKeyframeRequested: (() -> Unit)? = null
 
     fun start(host: String) {
         stop()
@@ -61,7 +63,7 @@ class VideoMirrorClient(private val surfaceView: SurfaceView) {
                     Log.i(TAG, "Connecting to video stream on $host:$VIDEO_PORT...")
                     val s = Socket().apply {
                         tcpNoDelay = true
-                        receiveBufferSize = 256 * 1024
+                        receiveBufferSize = 1024 * 1024
                         connect(InetSocketAddress(host, VIDEO_PORT), 3000)
                     }
                     activeSocket = s
@@ -79,8 +81,7 @@ class VideoMirrorClient(private val surfaceView: SurfaceView) {
                     while (running && (sps == null || pps == null)) {
                         val len = dataIn.readInt()
                         if (len <= 0 || len > packetBuf.size) {
-                            Log.e(TAG, "Invalid initial packet length: $len")
-                            return@Thread
+                            throw java.io.IOException("Invalid initial packet length: $len")
                         }
                         dataIn.readFully(packetBuf, 0, len)
                         val params = extractSpsPps(packetBuf, len)
@@ -93,8 +94,7 @@ class VideoMirrorClient(private val surfaceView: SurfaceView) {
                     }
 
                     if (sps == null || pps == null) {
-                        Log.e(TAG, "Stream ended before SPS/PPS arrived")
-                        break
+                        throw java.io.IOException("Stream ended before SPS/PPS arrived")
                     }
 
                     val resolution = SpsParser.parse(sps)
@@ -163,13 +163,15 @@ class VideoMirrorClient(private val surfaceView: SurfaceView) {
                     Log.i(TAG, "Decoder started in zero-latency hardware mode")
 
                     if (initialPacketLen > 0) {
-                        val index = availableInputBuffers.take()
-                        val buf = mediaCodec.getInputBuffer(index)
-                        if (buf != null) {
-                            buf.clear()
-                            buf.put(packetBuf, 0, initialPacketLen)
-                            val queueTimeUs = SystemClock.elapsedRealtimeNanos() / 1000
-                            mediaCodec.queueInputBuffer(index, 0, initialPacketLen, queueTimeUs, 0)
+                        val index = availableInputBuffers.poll(100, TimeUnit.MILLISECONDS)
+                        if (index != null) {
+                            val buf = mediaCodec.getInputBuffer(index)
+                            if (buf != null) {
+                                buf.clear()
+                                buf.put(packetBuf, 0, initialPacketLen)
+                                val queueTimeUs = SystemClock.elapsedRealtimeNanos() / 1000
+                                mediaCodec.queueInputBuffer(index, 0, initialPacketLen, queueTimeUs, 0)
+                            }
                         }
                     }
 
@@ -180,7 +182,12 @@ class VideoMirrorClient(private val surfaceView: SurfaceView) {
                             break
                         }
                         dataIn.readFully(packetBuf, 0, len)
-                        val index = availableInputBuffers.take()
+                        val index = availableInputBuffers.poll(8, TimeUnit.MILLISECONDS)
+                        if (index == null) {
+                            // Decoder input buffers saturated: drop frame to eliminate TCP backpressure and request fresh keyframe
+                            onKeyframeRequested?.invoke()
+                            continue
+                        }
                         val buf = mediaCodec.getInputBuffer(index) ?: continue
                         buf.clear()
                         buf.put(packetBuf, 0, len)
@@ -212,6 +219,7 @@ class VideoMirrorClient(private val surfaceView: SurfaceView) {
         running = false
         try { socket?.close() } catch (_: Exception) {}
         try { codec?.stop(); codec?.release() } catch (_: Exception) {}
+        try { workerThread?.interrupt() } catch (_: Exception) {}
         socket = null
         codec = null
         workerThread = null

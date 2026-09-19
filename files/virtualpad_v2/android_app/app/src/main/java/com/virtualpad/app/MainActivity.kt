@@ -77,7 +77,7 @@ class MainActivity : Activity(), SensorEventListener {
         150_000_000f to "150 Mbps (Near-Lossless)",
         200_000_000f to "200 Mbps (Max Peak)"
     )
-    private var currentBitrateIdx = 2
+    private var currentBitrateIdx = 3
     private val resPresets = listOf(Pair(1920f, 1080f) to "1080p", Pair(1280f, 720f) to "720p", Pair(1600f, 900f) to "900p", Pair(2560f, 1440f) to "2K")
     private var currentResIdx = 0
     private val fpsPresets = listOf(60f to "60 FPS", 90f to "90 FPS (Smooth)", 120f to "120 FPS (Ultra Gaming)")
@@ -170,6 +170,9 @@ class MainActivity : Activity(), SensorEventListener {
         videoMirrorClient = VideoMirrorClient(surfaceView)
         audioMirrorClient = AudioMirrorClient()
         streamControlClient = StreamControlClient()
+        videoMirrorClient.onKeyframeRequested = {
+            streamControlClient.requestKeyframe()
+        }
 
         root.addView(
             surfaceView,
