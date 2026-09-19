@@ -174,7 +174,25 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
 
     var hudOpacity: Float = 1.0f
         set(value) {
-            field = value.coerceIn(0.2f, 1.0f)
+            field = value.coerceIn(0.0f, 1.0f)
+            invalidate()
+        }
+
+    var buttonFillOpacity: Float = 0.70f
+        set(value) {
+            field = value.coerceIn(0.0f, 1.0f)
+            invalidate()
+        }
+
+    var buttonBorderOpacity: Float = 1.0f
+        set(value) {
+            field = value.coerceIn(0.0f, 1.0f)
+            invalidate()
+        }
+
+    var buttonTextOpacity: Float = 1.0f
+        set(value) {
+            field = value.coerceIn(0.0f, 1.0f)
             invalidate()
         }
 
@@ -347,6 +365,9 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
     init {
         isHapticFeedbackEnabled = true
         hudOpacity = HudConfig.getHudOpacity(context)
+        buttonFillOpacity = HudConfig.getButtonFillOpacity(context)
+        buttonBorderOpacity = HudConfig.getButtonBorderOpacity(context)
+        buttonTextOpacity = HudConfig.getButtonTextOpacity(context)
         stickTouchScale = HudConfig.getStickTouchScale(context)
         stickFloatingMode = HudConfig.isStickFloatingMode(context)
         elements.addAll(HudConfig.loadLayout(context))
@@ -370,6 +391,9 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
         super.onSizeChanged(w, h, oldw, oldh)
         if (elements.isEmpty()) {
             hudOpacity = HudConfig.getHudOpacity(context)
+            buttonFillOpacity = HudConfig.getButtonFillOpacity(context)
+            buttonBorderOpacity = HudConfig.getButtonBorderOpacity(context)
+            buttonTextOpacity = HudConfig.getButtonTextOpacity(context)
             elements.addAll(HudConfig.loadLayout(context))
         }
         layoutReady = true
@@ -390,17 +414,23 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
         val W = width.toFloat()
         val H = height.toFloat()
 
-        // Apply opacity modulation
+        // Apply opacity modulation (Fill, Border, and Text independently controllable down to 0%)
         val alphaMultiplier = if (isEditMode) 1.0f else hudOpacity
-        val alpha255 = (255 * alphaMultiplier).toInt().coerceIn(40, 255)
-        outlinePaint.alpha = alpha255
-        customOutlinePaint.alpha = alpha255
-        fillPaint.alpha = (180 * alphaMultiplier).toInt().coerceIn(30, 255)
-        fillActivePaint.alpha = 255
-        customFillPaint.alpha = (180 * alphaMultiplier).toInt().coerceIn(30, 255)
-        customFillActivePaint.alpha = 255
-        textPaint.alpha = alpha255
-        subTextPaint.alpha = (200 * alphaMultiplier).toInt().coerceIn(30, 255)
+        val borderAlpha = if (isEditMode) 255 else (255 * buttonBorderOpacity * alphaMultiplier).toInt().coerceIn(0, 255)
+        val fillAlpha = if (isEditMode) 180 else (180 * buttonFillOpacity * alphaMultiplier).toInt().coerceIn(0, 255)
+        val textAlpha = if (isEditMode) 255 else (255 * buttonTextOpacity * alphaMultiplier).toInt().coerceIn(0, 255)
+        val subTextAlpha = if (isEditMode) 200 else (200 * buttonTextOpacity * alphaMultiplier).toInt().coerceIn(0, 255)
+        val activeFillAlpha = if (isEditMode) 255 else maxOf(140, (255 * buttonBorderOpacity).toInt().coerceIn(80, 255))
+
+        outlinePaint.alpha = borderAlpha
+        customOutlinePaint.alpha = borderAlpha
+        fillPaint.alpha = fillAlpha
+        fillActivePaint.alpha = activeFillAlpha
+        customFillPaint.alpha = fillAlpha
+        customFillActivePaint.alpha = activeFillAlpha
+        textPaint.alpha = textAlpha
+        subTextPaint.alpha = subTextAlpha
+        badgePaint.alpha = if (isEditMode) 255 else textAlpha
 
         // Only draw swipe zone guide in edit mode so gameplay screen is 100% unobstructed!
         if (isEditMode) {

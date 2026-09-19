@@ -225,6 +225,9 @@ class MainActivity : Activity(), SensorEventListener {
         // 1. Controller View (Transparent HUD Layer)
         controllerView = ControllerView(this)
         controllerView.hudOpacity = HudConfig.getHudOpacity(this)
+        controllerView.buttonFillOpacity = HudConfig.getButtonFillOpacity(this)
+        controllerView.buttonBorderOpacity = HudConfig.getButtonBorderOpacity(this)
+        controllerView.buttonTextOpacity = HudConfig.getButtonTextOpacity(this)
         controllerView.onViewportTouch = { ev ->
             viewportManager.onTouchEvent(ev)
         }
@@ -745,31 +748,106 @@ class MainActivity : Activity(), SensorEventListener {
         jsonShareRow.addView(importJsonBtn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
         layout.addView(jsonShareRow)
 
-        // Section: HUD Opacity Slider
-        val opacityLabel = TextView(this).apply {
-            text = "HUD Opacity: ${(controllerView.hudOpacity * 100).toInt()}%"
-            setTextColor(Color.WHITE)
-            textSize = 13f
-            setPadding(0, 8, 0, 4)
+        // Section: Button Appearance & Opacity (Independent 3-Way Transparency Control)
+        val opacitySectionCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = createCardDrawable(Color.parseColor("#1C2128"), 16f, Color.parseColor("#30363D"), 1)
+            setPadding(20, 16, 20, 18)
+            val params = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                topMargin = 12
+                bottomMargin = 8
+            }
+            layoutParams = params
         }
-        layout.addView(opacityLabel)
 
-        val opacityBar = SeekBar(this).apply {
+        val opacityHeader = TextView(this).apply {
+            text = "🎨 Button Appearance & Transparency"
+            setTextColor(Color.parseColor("#58A6FF"))
+            textSize = 13.5f
+            paint.isFakeBoldText = true
+            setPadding(0, 0, 0, 8)
+        }
+        opacitySectionCard.addView(opacityHeader)
+
+        // 1. Background Fill Opacity (Can drop all the way to 0% for 100% invisible button bodies)
+        val fillLabel = TextView(this).apply {
+            val p = (controllerView.buttonFillOpacity * 100).toInt()
+            text = if (p == 0) "Button Fill: 0% (Completely Invisible)" else "Button Fill: $p%"
+            setTextColor(Color.WHITE)
+            textSize = 12f
+            setPadding(0, 4, 0, 2)
+        }
+        opacitySectionCard.addView(fillLabel)
+
+        val fillBar = SeekBar(this).apply {
             max = 100
-            progress = (controllerView.hudOpacity * 100).toInt()
+            progress = (controllerView.buttonFillOpacity * 100).toInt()
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
-                    val safeProg = progress.coerceAtLeast(20) // min 20%
-                    val op = safeProg / 100f
-                    opacityLabel.text = "HUD Opacity: $safeProg%"
-                    controllerView.hudOpacity = op
-                    HudConfig.setHudOpacity(this@MainActivity, op)
+                    val op = progress / 100f
+                    fillLabel.text = if (progress == 0) "Button Fill: 0% (Completely Invisible)" else "Button Fill: $progress%"
+                    controllerView.buttonFillOpacity = op
+                    HudConfig.setButtonFillOpacity(this@MainActivity, op)
                 }
                 override fun onStartTrackingTouch(seekBar: SeekBar?) {}
                 override fun onStopTrackingTouch(seekBar: SeekBar?) {}
             })
         }
-        layout.addView(opacityBar)
+        opacitySectionCard.addView(fillBar)
+
+        // 2. Border Outline Opacity (0% - 100%)
+        val borderLabel = TextView(this).apply {
+            val p = (controllerView.buttonBorderOpacity * 100).toInt()
+            text = if (p == 0) "Border Outline: 0% (No Border)" else "Border Outline: $p%"
+            setTextColor(Color.WHITE)
+            textSize = 12f
+            setPadding(0, 8, 0, 2)
+        }
+        opacitySectionCard.addView(borderLabel)
+
+        val borderBar = SeekBar(this).apply {
+            max = 100
+            progress = (controllerView.buttonBorderOpacity * 100).toInt()
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                    val op = progress / 100f
+                    borderLabel.text = if (progress == 0) "Border Outline: 0% (No Border)" else "Border Outline: $progress%"
+                    controllerView.buttonBorderOpacity = op
+                    HudConfig.setButtonBorderOpacity(this@MainActivity, op)
+                }
+                override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+                override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+            })
+        }
+        opacitySectionCard.addView(borderBar)
+
+        // 3. Text & Action Label Opacity (0% - 100%)
+        val textLabel = TextView(this).apply {
+            val p = (controllerView.buttonTextOpacity * 100).toInt()
+            text = if (p == 0) "Text & Action Names: 0% (Hidden)" else "Text & Action Names: $p%"
+            setTextColor(Color.WHITE)
+            textSize = 12f
+            setPadding(0, 8, 0, 2)
+        }
+        opacitySectionCard.addView(textLabel)
+
+        val textBar = SeekBar(this).apply {
+            max = 100
+            progress = (controllerView.buttonTextOpacity * 100).toInt()
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                    val op = progress / 100f
+                    textLabel.text = if (progress == 0) "Text & Action Names: 0% (Hidden)" else "Text & Action Names: $progress%"
+                    controllerView.buttonTextOpacity = op
+                    HudConfig.setButtonTextOpacity(this@MainActivity, op)
+                }
+                override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+                override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+            })
+        }
+        opacitySectionCard.addView(textBar)
+
+        layout.addView(opacitySectionCard)
 
         // Section: Mouse Look Sensitivity
         val sensLabel = TextView(this).apply {

@@ -373,6 +373,9 @@ object HudConfig {
     private const val KEY_ACTIVE_PROFILE = "active_profile"
     private const val KEY_PROFILES_LIST = "profiles_list"
     private const val KEY_OPACITY = "hud_opacity"
+    private const val KEY_FILL_OPACITY = "hud_fill_opacity"
+    private const val KEY_BORDER_OPACITY = "hud_border_opacity"
+    private const val KEY_TEXT_OPACITY = "hud_text_opacity"
     private const val KEY_GYRO_ENABLED = "gyro_enabled"
     private const val KEY_GYRO_SENSITIVITY = "gyro_sensitivity"
     private const val KEY_GYRO_AIM_ONLY = "gyro_aim_only"
@@ -1535,6 +1538,33 @@ object HudConfig {
 
     fun setHudOpacity(context: Context, opacity: Float) {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit().putFloat(KEY_OPACITY, opacity).apply()
+    }
+
+    // Button Fill Opacity (Can drop down to 0% for complete transparency)
+    fun getButtonFillOpacity(context: Context): Float {
+        return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getFloat(KEY_FILL_OPACITY, 0.70f)
+    }
+
+    fun setButtonFillOpacity(context: Context, opacity: Float) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit().putFloat(KEY_FILL_OPACITY, opacity.coerceIn(0f, 1f)).apply()
+    }
+
+    // Button Border / Outline Opacity (0% - 100%)
+    fun getButtonBorderOpacity(context: Context): Float {
+        return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getFloat(KEY_BORDER_OPACITY, 1.0f)
+    }
+
+    fun setButtonBorderOpacity(context: Context, opacity: Float) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit().putFloat(KEY_BORDER_OPACITY, opacity.coerceIn(0f, 1f)).apply()
+    }
+
+    // Button Text & Action Label Opacity (0% - 100%)
+    fun getButtonTextOpacity(context: Context): Float {
+        return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getFloat(KEY_TEXT_OPACITY, 1.0f)
+    }
+
+    fun setButtonTextOpacity(context: Context, opacity: Float) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit().putFloat(KEY_TEXT_OPACITY, opacity.coerceIn(0f, 1f)).apply()
     }
 
     // Gyroscope
