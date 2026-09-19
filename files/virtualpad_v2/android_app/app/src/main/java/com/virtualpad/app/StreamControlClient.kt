@@ -103,4 +103,12 @@ class StreamControlClient {
     fun setCursorVisible(visible: Boolean) {
         sendPacket(14.toByte(), if (visible) 1.0f else 0.0f, 0.0f)
     }
+
+    fun sendCongestionFeedback(scale: Float) {
+        sendPacket(15.toByte(), scale, 0.0f)
+    }
+
+    fun setCodec(codecId: Byte) {
+        sendPacket(16.toByte(), codecId.toFloat(), 0.0f)
+    }
 }

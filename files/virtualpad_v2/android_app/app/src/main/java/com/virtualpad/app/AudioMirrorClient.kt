@@ -30,18 +30,20 @@ class AudioMirrorClient {
 
     var isAudioEnabled: Boolean = true
 
+    @Synchronized
     fun start(host: String) {
         stop()
         if (!isAudioEnabled) return
         running = true
 
-        workerThread = Thread {
-            while (running) {
+        val t = Thread {
+            while (running && Thread.currentThread() == workerThread) {
                 var track: AudioTrack? = null
                 var socket: Socket? = null
                 try {
                     Log.i(TAG, "Connecting to audio stream on $host:$AUDIO_PORT...")
                     socket = Socket().apply {
+                        receiveBufferSize = 8 * 1024
                         connect(InetSocketAddress(host, AUDIO_PORT), 3000)
                         tcpNoDelay = true
                         soTimeout = 8000
@@ -62,11 +64,12 @@ class AudioMirrorClient {
                         AudioFormat.CHANNEL_OUT_STEREO,
                         AudioFormat.ENCODING_PCM_16BIT
                     )
-                    val bufferSize = (minBuf * 2).coerceAtLeast(4096)
+                    val bufferSize = minBuf.coerceAtLeast(2048)
 
+                    // USAGE_GAME + CONTENT_TYPE_SONIFICATION routes through Android FastMixer (low-latency path)
                     val attributes = AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_MEDIA)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                        .setUsage(AudioAttributes.USAGE_GAME)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
                         .build()
 
                     val format = AudioFormat.Builder()
@@ -87,15 +90,47 @@ class AudioMirrorClient {
 
                     track = trackBuilder.build()
                     audioTrack = track
-                    track.play()
-                    Log.i(TAG, "AudioTrack playing at $validRate Hz (Low-Latency)")
 
-                    val pcmBuf = ByteArray(4096)
+                    // API 24+: Set hardware buffer size to ~20ms to eliminate mixer queue latency
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                        val targetFrames = (validRate * 20) / 1000
+                        val minFrames = minBuf / 4
+                        track.setBufferSizeInFrames(targetFrames.coerceAtLeast(minFrames))
+                    }
+
+                    track.play()
+                    Log.i(TAG, "AudioTrack playing at $validRate Hz (Ultra-Low Latency FastMixer)")
+
+                    val pcmBuf = ByteArray(2048)
                     socket.soTimeout = 0 // Continuous stream
+                    var framesWritten: Long = 0L
 
                     while (running) {
                         val n = inStream.read(pcmBuf, 0, pcmBuf.size)
                         if (n <= 0) break
+
+                        // Latency Drift Guard: monitor buffered frame delay
+                        framesWritten += (n / 4)
+                        val headPos = track.playbackHeadPosition.toLong() and 0xFFFFFFFFL
+                        val unplayedFrames = framesWritten - headPos
+                        val latencyMs = (unplayedFrames * 1000) / validRate
+
+                        // If audio queue drifts beyond 40ms, drop stale frames/backlog
+                        if (latencyMs > 40) {
+                            if (latencyMs > 100) {
+                                track.pause()
+                                track.flush()
+                                track.play()
+                                framesWritten = track.playbackHeadPosition.toLong() and 0xFFFFFFFFL
+                            }
+                            val avail = inStream.available()
+                            if (avail > 0) {
+                                val toSkip = avail.coerceAtMost(8192)
+                                inStream.skipBytes(toSkip)
+                            }
+                            continue
+                        }
+
                         track.write(pcmBuf, 0, n)
                     }
                 } catch (e: Exception) {
@@ -114,17 +149,24 @@ class AudioMirrorClient {
         }.apply {
             priority = Thread.MAX_PRIORITY
             isDaemon = true
-            start()
         }
+        workerThread = t
+        t.start()
     }
 
+    @Synchronized
     fun stop() {
         running = false
+        val t = workerThread
+        workerThread = null
         try { audioSocket?.close() } catch (_: Exception) {}
         try { audioTrack?.stop() } catch (_: Exception) {}
         try { audioTrack?.release() } catch (_: Exception) {}
+        try { t?.interrupt() } catch (_: Exception) {}
+        if (t != null && t.isAlive && Thread.currentThread() != t) {
+            try { t.join(300) } catch (_: Exception) {}
+        }
         audioSocket = null
         audioTrack = null
-        workerThread = null
     }
 }

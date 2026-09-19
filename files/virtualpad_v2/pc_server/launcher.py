@@ -568,7 +568,7 @@ def start_pcmirror_daemon():
     global pcmirror_process
     # Preflight sweep: cleanly kill any zombie PCMirror.exe from previous dirty crashes
     try:
-        silent_run(["taskkill", "/F", "/IM", "PCMirror.exe", "/T"], capture_output=True, timeout=3)
+        silent_run(["taskkill", "/F", "/IM", "PCMirror.exe"], capture_output=True, timeout=3)
         time.sleep(0.3)
     except Exception:
         pass
@@ -580,8 +580,8 @@ def start_pcmirror_daemon():
 
     try:
         # Args: <port> <width> <height> <fps> <bitrate> [--no-adb-watcher]
-        # 8080 0 0 60 80000000 (0 0 auto-detects native screen resolution)
-        cmd = [pcmirror_bin, "8080", "0", "0", "60", "80000000", "--no-adb-watcher"]
+        # 8080 0 0 120 80000000 (0 0 auto-detects native screen resolution)
+        cmd = [pcmirror_bin, "8080", "0", "0", "120", "80000000", "--no-adb-watcher"]
         pcmirror_process = silent_popen(cmd, cwd=os.path.dirname(pcmirror_bin))
         assign_process_to_job(pcmirror_process)
         print(f"[INFO] PCMirror native engine started (PID: {pcmirror_process.pid})")
@@ -598,7 +598,7 @@ def stop_pcmirror_daemon():
             pass
         pcmirror_process = None
     try:
-        silent_run(["taskkill", "/F", "/IM", "PCMirror.exe", "/T"], capture_output=True, timeout=2)
+        silent_run(["taskkill", "/F", "/IM", "PCMirror.exe"], capture_output=True, timeout=2)
     except Exception:
         pass
     print("[INFO] PCMirror native engine stopped.")
@@ -636,6 +636,14 @@ def auto_adb_reverse():
         lines = r.stdout.splitlines() if r.returncode == 0 else []
         devs = set([line.split("\t")[0].strip() for line in lines if "\tdevice" in line])
         unauthorized = any("\tunauthorized" in line for line in lines)
+        offline = any("\toffline" in line for line in lines)
+
+        if offline and not devs:
+            silent_run([adb_bin, "reconnect", "offline"], capture_output=True, timeout=4)
+            time.sleep(0.5)
+            r = silent_run([adb_bin, "devices"], capture_output=True, text=True, timeout=6)
+            lines = r.stdout.splitlines() if r.returncode == 0 else []
+            devs = set([line.split("\t")[0].strip() for line in lines if "\tdevice" in line])
 
         if unauthorized and not devs:
             usb_status_str = "⚠️ Phone unauthorized: Tap 'Allow USB debugging' on phone"
@@ -643,22 +651,24 @@ def auto_adb_reverse():
             return
 
         if devs:
-            # If the same devices are connected and were already reversed, maintain status without re-running ADB
-            if devs == _last_reversed_devices:
-                usb_status_str = f"🟢 USB Ready: All 4 ports routed ({len(devs)} device connected)"
-                return
+            rev_list = silent_run([adb_bin, "reverse", "--list"], capture_output=True, text=True, timeout=5)
+            rev_output = rev_list.stdout if rev_list.returncode == 0 else ""
+            needs_reverse = any(f"tcp:{p}" not in rev_output for p in REVERSE_PORTS)
 
-            all_ok = True
-            for p in REVERSE_PORTS:
-                rev = silent_run([adb_bin, "reverse", f"tcp:{p}", f"tcp:{p}"], capture_output=True, text=True, timeout=5)
-                if rev.returncode != 0:
-                    all_ok = False
+            if needs_reverse or devs != _last_reversed_devices:
+                all_ok = True
+                for p in REVERSE_PORTS:
+                    rev = silent_run([adb_bin, "reverse", f"tcp:{p}", f"tcp:{p}"], capture_output=True, text=True, timeout=5)
+                    if rev.returncode != 0:
+                        all_ok = False
 
-            if all_ok:
-                _last_reversed_devices = set(devs)
-                usb_status_str = f"🟢 USB Ready: All 4 ports routed ({len(devs)} device connected)"
+                if all_ok:
+                    _last_reversed_devices = set(devs)
+                    usb_status_str = f"🟢 USB Ready: All 4 ports routed ({len(devs)} device connected)"
+                else:
+                    usb_status_str = "⚠️ ADB reverse partial/failed on some ports"
             else:
-                usb_status_str = "⚠️ ADB reverse partial/failed on some ports"
+                usb_status_str = f"🟢 USB Ready: All 4 ports routed ({len(devs)} device connected)"
             return
 
         _last_reversed_devices.clear()

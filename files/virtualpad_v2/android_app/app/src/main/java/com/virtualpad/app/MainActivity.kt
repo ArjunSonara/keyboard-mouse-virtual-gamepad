@@ -7,6 +7,7 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.hardware.Sensor
@@ -16,7 +17,10 @@ import android.hardware.SensorManager
 import android.os.Build
 import android.os.Bundle
 import android.text.Editable
+import android.text.SpannableString
+import android.text.Spanned
 import android.text.TextWatcher
+import android.text.style.ForegroundColorSpan
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.Surface
@@ -44,6 +48,7 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.google.zxing.integration.android.IntentIntegrator
 import com.google.zxing.integration.android.IntentResult
+import java.util.Locale
 import kotlin.math.abs
 
 data class RecordedInputEvent(val key: String, val isDown: Boolean, val timestampMs: Long)
@@ -63,6 +68,8 @@ class MainActivity : Activity(), SensorEventListener {
     private lateinit var viewportManager: ViewportManager
     private lateinit var streamGearButton: Button
     private var viewportAdjustOverlay: FrameLayout? = null
+    private var telemetryOverlay: TextView? = null
+    private var isTelemetryHudEnabled: Boolean = false
     private var currentHostIp: String = "127.0.0.1"
     private var isMirroringEnabled: Boolean = true
 
@@ -82,6 +89,8 @@ class MainActivity : Activity(), SensorEventListener {
     private var currentResIdx = 0
     private val fpsPresets = listOf(60f to "60 FPS", 90f to "90 FPS (Smooth)", 120f to "120 FPS (Ultra Gaming)")
     private var currentFpsIdx = 2
+    private var currentCodec: String = "H.265 / HEVC"
+    private var isHevcActive: Boolean = true
 
     // Edit Mode Overlay UI Elements
     private lateinit var editOverlay: FrameLayout
@@ -140,8 +149,26 @@ class MainActivity : Activity(), SensorEventListener {
             View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
         )
 
+        // Lock Display Refresh Rate to 120Hz for Ultra-Smooth AMOLED Gaming
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            try {
+                val displayObj = display
+                val modes = displayObj?.supportedModes
+                val highRefreshMode = modes?.filter { it.refreshRate >= 119.0f }?.maxByOrNull { it.refreshRate }
+                if (highRefreshMode != null) {
+                    val params = window.attributes
+                    params.preferredDisplayModeId = highRefreshMode.modeId
+                    window.attributes = params
+                    android.util.Log.i("VirtualPad", "Locked display to 120Hz mode ID: ${highRefreshMode.modeId} (${highRefreshMode.refreshRate} Hz)")
+                }
+            } catch (e: Exception) {
+                android.util.Log.w("VirtualPad", "Could not lock 120Hz display mode: ${e.message}")
+            }
+        }
+
         prefs = getSharedPreferences("virtualpad", Context.MODE_PRIVATE)
         isMirroringEnabled = prefs.getBoolean("mirroring_enabled", true)
+        isTelemetryHudEnabled = prefs.getBoolean("telemetry_hud_enabled", false)
         networkClient = NetworkClient()
 
         // Initialize Gyroscope
@@ -172,6 +199,16 @@ class MainActivity : Activity(), SensorEventListener {
         streamControlClient = StreamControlClient()
         videoMirrorClient.onKeyframeRequested = {
             streamControlClient.requestKeyframe()
+        }
+        videoMirrorClient.onCongestionDetected = { scale ->
+            streamControlClient.sendCongestionFeedback(scale)
+        }
+        videoMirrorClient.onCodecDetected = { codecName ->
+            currentCodec = codecName
+            isHevcActive = codecName.contains("HEVC")
+        }
+        videoMirrorClient.onTelemetryUpdated = { telemetry ->
+            updateTelemetryDisplay(telemetry)
         }
 
         root.addView(
@@ -264,6 +301,9 @@ class MainActivity : Activity(), SensorEventListener {
 
         // 5. Viewport Adjust Mode Overlay
         buildViewportAdjustOverlay(root)
+
+        // 6. Live Performance Telemetry HUD Overlay
+        buildTelemetryOverlay(root)
 
         setContentView(root)
         networkClient.start()
@@ -414,6 +454,7 @@ class MainActivity : Activity(), SensorEventListener {
 
         if (enabled) {
             surfaceView.visibility = View.VISIBLE
+            telemetryOverlay?.visibility = if (isTelemetryHudEnabled) View.VISIBLE else View.GONE
             if (currentHostIp.isNotEmpty()) {
                 videoMirrorClient.start(currentHostIp)
                 audioMirrorClient.start(currentHostIp)
@@ -425,6 +466,7 @@ class MainActivity : Activity(), SensorEventListener {
             audioMirrorClient.stop()
             streamControlClient.stop()
             surfaceView.visibility = View.GONE
+            telemetryOverlay?.visibility = View.GONE
             Toast.makeText(this, "Pure Gamepad Mode: Mirroring DISABLED (0% PC load)", Toast.LENGTH_SHORT).show()
         }
     }
@@ -4944,6 +4986,27 @@ class MainActivity : Activity(), SensorEventListener {
             bottomMargin = 12
         })
 
+        // 2b. Hardware Codec Switcher Button (H.265 / HEVC vs H.264 / AVC)
+        val codecBtn = Button(this).apply {
+            text = "🚀 Codec: $currentCodec (Hardware Accelerated)"
+            textSize = 14f
+            paint.isFakeBoldText = true
+            setTextColor(Color.parseColor("#58A6FF"))
+            background = createCardDrawable(Color.parseColor("#21262D"), 16f, Color.parseColor("#30363D"), 1)
+            setPadding(20, 16, 20, 16)
+            setOnClickListener {
+                isHevcActive = !isHevcActive
+                currentCodec = if (isHevcActive) "H.265 / HEVC" else "H.264 / AVC"
+                val codecId: Byte = if (isHevcActive) 1.toByte() else 0.toByte()
+                streamControlClient.setCodec(codecId)
+                text = "🚀 Codec: $currentCodec (Hardware Accelerated)"
+                Toast.makeText(this@MainActivity, "Switching encoder to $currentCodec...", Toast.LENGTH_SHORT).show()
+            }
+        }
+        streamControlsContainer.addView(codecBtn, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+            bottomMargin = 12
+        })
+
         // 3. Resolution Switcher Button
         val resBtn = Button(this).apply {
             val currentPreset = resPresets[currentResIdx]
@@ -5004,6 +5067,39 @@ class MainActivity : Activity(), SensorEventListener {
             }
         }
         streamControlsContainer.addView(audioBtn, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+            bottomMargin = 12
+        })
+
+        // 5b. Live Performance Telemetry HUD Switcher (FPS, Latency, Bitrate)
+        val telemetryBtn = Button(this).apply {
+            fun updateBtn() {
+                if (isTelemetryHudEnabled) {
+                    text = "📊 Live Performance HUD: ON (Visible)"
+                    setTextColor(Color.parseColor("#3FB950"))
+                    background = createCardDrawable(Color.parseColor("#21262D"), 16f, Color.parseColor("#3FB950"), 2)
+                } else {
+                    text = "📊 Live Performance HUD: OFF"
+                    setTextColor(Color.parseColor("#8B949E"))
+                    background = createCardDrawable(Color.parseColor("#21262D"), 16f, Color.parseColor("#30363D"), 1)
+                }
+            }
+            updateBtn()
+            textSize = 14f
+            paint.isFakeBoldText = true
+            setPadding(20, 16, 20, 16)
+            setOnClickListener {
+                isTelemetryHudEnabled = !isTelemetryHudEnabled
+                prefs.edit().putBoolean("telemetry_hud_enabled", isTelemetryHudEnabled).apply()
+                updateBtn()
+                telemetryOverlay?.visibility = if (isTelemetryHudEnabled && isMirroringEnabled) View.VISIBLE else View.GONE
+                Toast.makeText(
+                    this@MainActivity,
+                    if (isTelemetryHudEnabled) "📊 Live Telemetry HUD: ON (FPS, Latency, Bitrate)" else "📊 Live Telemetry HUD: OFF",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+        }
+        streamControlsContainer.addView(telemetryBtn, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
             bottomMargin = 12
         })
 
@@ -5069,6 +5165,7 @@ class MainActivity : Activity(), SensorEventListener {
         viewportAdjustOverlay?.visibility = View.VISIBLE
         streamGearButton.visibility = View.GONE
         gearButton.visibility = View.GONE
+        telemetryOverlay?.visibility = View.GONE
     }
 
     private fun exitViewportAdjustMode() {
@@ -5077,6 +5174,7 @@ class MainActivity : Activity(), SensorEventListener {
         viewportAdjustOverlay?.visibility = View.GONE
         streamGearButton.visibility = View.VISIBLE
         gearButton.visibility = View.VISIBLE
+        telemetryOverlay?.visibility = if (isTelemetryHudEnabled && isMirroringEnabled) View.VISIBLE else View.GONE
         Toast.makeText(this, "🔒 Screen Viewport Locked for Gameplay", Toast.LENGTH_SHORT).show()
     }
 
@@ -5247,5 +5345,65 @@ class MainActivity : Activity(), SensorEventListener {
                 window?.setBackgroundDrawable(ColorDrawable(Color.parseColor("#161B22")))
                 show()
             }
+    }
+
+    private fun buildTelemetryOverlay(root: FrameLayout) {
+        val hud = TextView(this).apply {
+            typeface = Typeface.MONOSPACE
+            textSize = 11f
+            paint.isFakeBoldText = true
+            setTextColor(Color.WHITE)
+            gravity = Gravity.CENTER
+            setPadding(28, 10, 28, 10)
+            background = createCardDrawable(Color.parseColor("#CC0D1117"), 18f, Color.parseColor("#30363D"), 2)
+            visibility = if (isTelemetryHudEnabled && isMirroringEnabled) View.VISIBLE else View.GONE
+            isClickable = false
+            isFocusable = false
+            elevation = 100f
+            text = "● -- FPS  |  -- ms  |  -- Mbps  |  HEVC"
+        }
+        telemetryOverlay = hud
+        val params = FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT).apply {
+            gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+            topMargin = 16
+        }
+        root.addView(hud, params)
+    }
+
+    private fun updateTelemetryDisplay(telemetry: VideoMirrorClient.StreamTelemetry) {
+        runOnUiThread {
+            val hud = telemetryOverlay ?: return@runOnUiThread
+            if (!isTelemetryHudEnabled || !isMirroringEnabled) {
+                if (hud.visibility != View.GONE) hud.visibility = View.GONE
+                return@runOnUiThread
+            }
+            if (hud.visibility != View.VISIBLE) hud.visibility = View.VISIBLE
+
+            android.util.Log.d(
+                "VirtualPadTelemetry",
+                "Telemetry: FPS=${telemetry.fps}, Latency=${telemetry.decodeLatencyMs}ms, Bitrate=${telemetry.bitrateMbps}Mbps, Codec=${telemetry.codecName}, Res=${telemetry.width}x${telemetry.height}"
+            )
+
+            val dotColor = when {
+                telemetry.fps >= 55f && telemetry.decodeLatencyMs < 12f -> "#3FB950"
+                telemetry.fps >= 30f -> "#D29922"
+                telemetry.fps > 0f -> "#F85149"
+                else -> "#8B949E"
+            }
+
+            val dropText = if (telemetry.droppedFrames > 0) "  |  ⚠️ ${telemetry.droppedFrames} Drops" else ""
+            val codecShort = if (telemetry.codecName.contains("HEVC", ignoreCase = true)) "HEVC" else "H.264"
+            val resText = if (telemetry.height > 0) "${telemetry.height}p" else ""
+            val fullStr = "● ${String.format(Locale.US, "%.1f", telemetry.fps)} FPS  |  ${String.format(Locale.US, "%.1f", telemetry.decodeLatencyMs)} ms  |  ${String.format(Locale.US, "%.1f", telemetry.bitrateMbps)} Mbps  |  $codecShort $resText$dropText"
+
+            val spannable = SpannableString(fullStr)
+            spannable.setSpan(
+                ForegroundColorSpan(Color.parseColor(dotColor)),
+                0,
+                1,
+                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+            )
+            hud.text = spannable
+        }
     }
 }
