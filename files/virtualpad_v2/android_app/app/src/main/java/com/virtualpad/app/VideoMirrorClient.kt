@@ -109,6 +109,7 @@ class VideoMirrorClient(private val surfaceView: SurfaceView) {
                     val format = MediaFormat.createVideoFormat(MIME, streamWidth, streamHeight).apply {
                         setByteBuffer("csd-0", ByteBuffer.wrap(sps))
                         setByteBuffer("csd-1", ByteBuffer.wrap(pps))
+                        setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 4 * 1024 * 1024)
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                             setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
                         }
@@ -189,6 +190,11 @@ class VideoMirrorClient(private val surfaceView: SurfaceView) {
                             continue
                         }
                         val buf = mediaCodec.getInputBuffer(index) ?: continue
+                        if (buf.capacity() < len) {
+                            Log.w(TAG, "Frame size $len exceeds buffer capacity ${buf.capacity()}, dropping and requesting keyframe")
+                            onKeyframeRequested?.invoke()
+                            continue
+                        }
                         buf.clear()
                         buf.put(packetBuf, 0, len)
                         val queueTimeUs = SystemClock.elapsedRealtimeNanos() / 1000
