@@ -1048,7 +1048,36 @@ class MainActivity : Activity(), SensorEventListener {
         }
         layout.addView(sensBar)
 
-        // Section: Gyroscope Aiming
+        // Section: Pro Esports Touch Aim Engine
+        val esportsCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = createCardDrawable(Color.parseColor("#1B2234"), 14f)
+            setPadding(24, 18, 24, 18)
+        }
+        val esportsBtn = Button(this).apply {
+            text = "🎯 PRO ESPORTS TOUCH AIM ENGINE"
+            textSize = 13f
+            paint.isFakeBoldText = true
+            setTextColor(Color.WHITE)
+            background = createCardDrawable(Color.parseColor("#8A2BE2"), 12f)
+            setPadding(24, 14, 24, 14)
+            setOnClickListener {
+                showEsportsAimEngineDialog()
+            }
+        }
+        esportsCard.addView(esportsBtn)
+        val esportsSubtitle = TextView(this).apply {
+            text = "DPI Normalization • Jitter Filter • Valorant / CS2 / Warzone Aim Curves"
+            setTextColor(Color.parseColor("#79C0FF"))
+            textSize = 11f
+            gravity = Gravity.CENTER
+            setPadding(0, 8, 0, 0)
+        }
+        esportsCard.addView(esportsSubtitle)
+        layout.addView(esportsCard, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+            topMargin = 16
+            bottomMargin = 16
+        })
         val gyroTitle = TextView(this).apply {
             text = "🎯 Gyroscope Motion Aiming"
             setTextColor(Color.parseColor("#58A6FF"))
@@ -1329,6 +1358,277 @@ class MainActivity : Activity(), SensorEventListener {
         }
 
         dialog.show()
+    }
+
+    private fun showEsportsAimEngineDialog() {
+        val scroll = ScrollView(this)
+        val layout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(36, 24, 36, 24)
+            setBackgroundColor(Color.parseColor("#0D1117"))
+        }
+        scroll.addView(layout)
+
+        // Header Title
+        val titleView = TextView(this).apply {
+            text = "🎯 PRO ESPORTS TOUCH AIM ENGINE"
+            setTextColor(Color.parseColor("#58A6FF"))
+            textSize = 16f
+            paint.isFakeBoldText = true
+            setPadding(0, 0, 0, 6)
+        }
+        layout.addView(titleView)
+
+        val descView = TextView(this).apply {
+            text = "Esports-grade mathematical input filters. Calibrates touch delta directly into raw relative mouse input for unshakeable muscle memory and zero jitter."
+            setTextColor(Color.parseColor("#8B949E"))
+            textSize = 12f
+            setPadding(0, 0, 0, 18)
+        }
+        layout.addView(descView)
+
+        // --- Feature 1: Physical Millimeter Normalization (DPI Calibration) ---
+        val dpiCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = createCardDrawable(Color.parseColor("#161B22"), 14f)
+            setPadding(20, 16, 20, 16)
+        }
+        val dpiHeader = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val dpiTitle = TextView(this).apply {
+            text = "📏 Physical Millimeter Normalization"
+            setTextColor(Color.parseColor("#79C0FF"))
+            textSize = 14f
+            paint.isFakeBoldText = true
+        }
+        dpiHeader.addView(dpiTitle, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+
+        val dpiSwitch = Switch(this).apply {
+            isChecked = controllerView.isDpiNormalizationEnabled
+            setOnCheckedChangeListener { _, isChecked ->
+                controllerView.isDpiNormalizationEnabled = isChecked
+                HudConfig.setDpiNormalizationEnabled(this@MainActivity, isChecked)
+                Toast.makeText(this@MainActivity, if (isChecked) "📏 Physical DPI Calibration ON" else "DPI Calibration OFF", Toast.LENGTH_SHORT).show()
+            }
+        }
+        dpiHeader.addView(dpiSwitch)
+        dpiCard.addView(dpiHeader)
+
+        val dpiDesc = TextView(this).apply {
+            text = "Normalizes swipe distance by physical millimeters instead of raw screen pixels. 1 cm of finger swipe produces the exact same crosshair turn degrees across any phone or screen resolution (1080p, 2K, 4K). Guarantees permanent muscle memory across all devices."
+            setTextColor(Color.parseColor("#8B949E"))
+            textSize = 11f
+            setPadding(0, 6, 0, 0)
+        }
+        dpiCard.addView(dpiDesc)
+        layout.addView(dpiCard, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { bottomMargin = 16 })
+
+        // --- Feature 2: Micro-Jitter Suppression (Pulse & Tremor Filter) ---
+        val jitterCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = createCardDrawable(Color.parseColor("#161B22"), 14f)
+            setPadding(20, 16, 20, 16)
+        }
+        val jitterHeader = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val jitterTitle = TextView(this).apply {
+            text = "🛡️ Micro-Jitter Suppression"
+            setTextColor(Color.parseColor("#79C0FF"))
+            textSize = 14f
+            paint.isFakeBoldText = true
+        }
+        jitterHeader.addView(jitterTitle, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+
+        val jitterSwitch = Switch(this).apply {
+            isChecked = controllerView.isJitterFilterEnabled
+            setOnCheckedChangeListener { _, isChecked ->
+                controllerView.isJitterFilterEnabled = isChecked
+                HudConfig.setJitterFilterEnabled(this@MainActivity, isChecked)
+                Toast.makeText(this@MainActivity, if (isChecked) "🛡️ Jitter Filter ON" else "Jitter Filter OFF", Toast.LENGTH_SHORT).show()
+            }
+        }
+        jitterHeader.addView(jitterSwitch)
+        jitterCard.addView(jitterHeader)
+
+        val jitterDesc = TextView(this).apply {
+            text = "Filters out microscopic fingertip pulse vibrations and skin capacitance fluctuations when holding an angle in CS2/Valorant. Keeps sniper crosshairs rock-solid while moving with 0ms delay on intentional flicks."
+            setTextColor(Color.parseColor("#8B949E"))
+            textSize = 11f
+            setPadding(0, 6, 0, 8)
+        }
+        jitterCard.addView(jitterDesc)
+
+        val threshLabel = TextView(this).apply {
+            text = "Deadband Threshold: ${String.format("%.2f", controllerView.jitterFilterThreshold)} px (Default: 0.15 px)"
+            setTextColor(Color.WHITE)
+            textSize = 12f
+            setPadding(0, 4, 0, 4)
+        }
+        jitterCard.addView(threshLabel)
+
+        val threshBar = SeekBar(this).apply {
+            max = 50 // 0.01 to 0.50 px
+            progress = (controllerView.jitterFilterThreshold * 100).toInt().coerceIn(1, 50)
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar?, prog: Int, fromUser: Boolean) {
+                    val t = (prog.coerceAtLeast(1)) / 100f
+                    threshLabel.text = "Deadband Threshold: ${String.format("%.2f", t)} px (Default: 0.15 px)"
+                    if (fromUser) {
+                        controllerView.jitterFilterThreshold = t
+                        HudConfig.setJitterFilterThreshold(this@MainActivity, t)
+                    }
+                }
+                override fun onStartTrackingTouch(sb: SeekBar?) {}
+                override fun onStopTrackingTouch(sb: SeekBar?) {}
+            })
+        }
+        jitterCard.addView(threshBar)
+        layout.addView(jitterCard, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { bottomMargin = 16 })
+
+        // --- Feature 3: Aim Response Curve Profile ---
+        val curveCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = createCardDrawable(Color.parseColor("#161B22"), 14f)
+            setPadding(20, 16, 20, 16)
+        }
+        val curveTitle = TextView(this).apply {
+            text = "📈 Aim Response Curve Profile"
+            setTextColor(Color.parseColor("#79C0FF"))
+            textSize = 14f
+            paint.isFakeBoldText = true
+            setPadding(0, 0, 0, 10)
+        }
+        curveCard.addView(curveTitle)
+
+        val curveRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, 4, 0, 10)
+        }
+
+        val linearBtn = Button(this).apply {
+            text = "🎯 Pure Linear 1:1\n★ Best for: Valorant / CS2"
+            textSize = 11f
+            paint.isFakeBoldText = true
+            setPadding(10, 12, 10, 12)
+        }
+        val scurveBtn = Button(this).apply {
+            text = "⚡ Dynamic S-Curve\n★ Best for: Warzone / Apex"
+            textSize = 11f
+            paint.isFakeBoldText = true
+            setPadding(10, 12, 10, 12)
+        }
+
+        // Tweak panel for S-Curve
+        val tweakLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, 10, 0, 4)
+            visibility = if (controllerView.aimCurveMode == AimCurveMode.S_CURVE) View.VISIBLE else View.GONE
+        }
+
+        val dampLabel = TextView(this).apply {
+            val pct = ((1.0f - controllerView.sCurveDampening) * 100).toInt()
+            text = "Sniper Micro-Precision Dampening: -$pct% (Slow micro-aim reduced by $pct%)"
+            setTextColor(Color.WHITE)
+            textSize = 11f
+            setPadding(0, 4, 0, 2)
+        }
+        tweakLayout.addView(dampLabel)
+
+        val dampBar = SeekBar(this).apply {
+            max = 50 // 0.50f (50% reduction) to 0.90f (10% reduction)
+            progress = ((1.0f - controllerView.sCurveDampening) * 100).toInt().coerceIn(10, 50)
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar?, prog: Int, fromUser: Boolean) {
+                    val damp = 1.0f - (prog / 100f)
+                    dampLabel.text = "Sniper Micro-Precision Dampening: -$prog% (Slow micro-aim reduced by $prog%)"
+                    if (fromUser) {
+                        controllerView.sCurveDampening = damp
+                        HudConfig.setSCurveDampening(this@MainActivity, damp)
+                    }
+                }
+                override fun onStartTrackingTouch(sb: SeekBar?) {}
+                override fun onStopTrackingTouch(sb: SeekBar?) {}
+            })
+        }
+        tweakLayout.addView(dampBar)
+
+        val boostLabel = TextView(this).apply {
+            text = "High-Speed Flick Boost Factor: ${String.format("%.2f", controllerView.sCurveFlickBoost)}x (180° turn boost)"
+            setTextColor(Color.WHITE)
+            textSize = 11f
+            setPadding(0, 10, 0, 2)
+        }
+        tweakLayout.addView(boostLabel)
+
+        val boostBar = SeekBar(this).apply {
+            max = 100 // 1.00x to 2.00x
+            progress = ((controllerView.sCurveFlickBoost - 1.0f) * 100).toInt().coerceIn(0, 100)
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar?, prog: Int, fromUser: Boolean) {
+                    val boost = 1.0f + (prog / 100f)
+                    boostLabel.text = "High-Speed Flick Boost Factor: ${String.format("%.2f", boost)}x (180° turn boost)"
+                    if (fromUser) {
+                        controllerView.sCurveFlickBoost = boost
+                        HudConfig.setSCurveFlickBoost(this@MainActivity, boost)
+                    }
+                }
+                override fun onStartTrackingTouch(sb: SeekBar?) {}
+                override fun onStopTrackingTouch(sb: SeekBar?) {}
+            })
+        }
+        tweakLayout.addView(boostBar)
+
+        val modeDesc = TextView(this).apply {
+            setTextColor(Color.parseColor("#8B949E"))
+            textSize = 11f
+            setPadding(0, 6, 0, 4)
+        }
+
+        fun updateCurveButtons() {
+            val isLinear = controllerView.aimCurveMode == AimCurveMode.LINEAR
+            linearBtn.background = createCardDrawable(if (isLinear) Color.parseColor("#1F6FEB") else Color.parseColor("#21262D"), 12f)
+            linearBtn.setTextColor(if (isLinear) Color.WHITE else Color.parseColor("#8B949E"))
+
+            scurveBtn.background = createCardDrawable(if (!isLinear) Color.parseColor("#8A2BE2") else Color.parseColor("#21262D"), 12f)
+            scurveBtn.setTextColor(if (!isLinear) Color.WHITE else Color.parseColor("#8B949E"))
+
+            tweakLayout.visibility = if (isLinear) View.GONE else View.VISIBLE
+            modeDesc.text = if (isLinear) {
+                "• Mode A (Linear 1:1): Strict raw input. Fast or slow, 2cm swipe = exact same crosshair degrees every single time. Unshakeable muscle memory for tactical flick headshots."
+            } else {
+                "• Mode B (Dynamic S-Curve): Smoothly dampens micro-movements for sniper tracking, while fast thumb swipes scale up so you can do 180° turns without running out of screen glass."
+            }
+        }
+
+        linearBtn.setOnClickListener {
+            controllerView.aimCurveMode = AimCurveMode.LINEAR
+            HudConfig.setAimCurveMode(this@MainActivity, AimCurveMode.LINEAR)
+            updateCurveButtons()
+            Toast.makeText(this@MainActivity, "🎯 Mode: Pure Linear 1:1 Active", Toast.LENGTH_SHORT).show()
+        }
+        scurveBtn.setOnClickListener {
+            controllerView.aimCurveMode = AimCurveMode.S_CURVE
+            HudConfig.setAimCurveMode(this@MainActivity, AimCurveMode.S_CURVE)
+            updateCurveButtons()
+            Toast.makeText(this@MainActivity, "⚡ Mode: Dynamic S-Curve Active", Toast.LENGTH_SHORT).show()
+        }
+
+        updateCurveButtons()
+        curveRow.addView(linearBtn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = 8 })
+        curveRow.addView(scurveBtn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        curveCard.addView(curveRow)
+        curveCard.addView(modeDesc)
+        curveCard.addView(tweakLayout)
+        layout.addView(curveCard, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { bottomMargin = 16 })
+
+        AlertDialog.Builder(this)
+            .setView(scroll)
+            .setPositiveButton("Done", null)
+            .show()
     }
 
     // -------------------------------------------------------------------

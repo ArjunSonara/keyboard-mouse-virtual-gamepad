@@ -361,6 +361,51 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
     private var accumDy = 0f
     var mouseSensitivity = 1.75f
 
+    // Pro Esports Touch Aim Engine
+    var isDpiNormalizationEnabled = true
+    var isJitterFilterEnabled = true
+    var jitterFilterThreshold = 0.15f
+    var aimCurveMode = AimCurveMode.LINEAR
+    var sCurveDampening = 0.75f
+    var sCurveFlickBoost = 1.35f
+
+    private val dpiScaleFactor: Float by lazy {
+        val xdpi = context.resources.displayMetrics.xdpi
+        if (xdpi > 50f) 160f / xdpi else 1.0f
+    }
+
+    fun processAimDelta(rawDx: Float, rawDy: Float): Pair<Float, Float> {
+        // 1. Physical DPI Normalization
+        var dx = if (isDpiNormalizationEnabled) rawDx * dpiScaleFactor else rawDx
+        var dy = if (isDpiNormalizationEnabled) rawDy * dpiScaleFactor else rawDy
+
+        // 2. Micro-Jitter Suppression (Pulse/Tremor Deadband)
+        val dist = hypot(dx.toDouble(), dy.toDouble()).toFloat()
+        if (isJitterFilterEnabled && dist < jitterFilterThreshold) {
+            return Pair(0f, 0f)
+        }
+
+        // 3. Aim Response Curve Profile
+        if (aimCurveMode == AimCurveMode.S_CURVE) {
+            val factor = when {
+                dist < 3.0f -> {
+                    // Smoothly blend from sCurveDampening up to 1.0f for sniper micro-adjustments
+                    sCurveDampening + (1.0f - sCurveDampening) * (dist / 3.0f)
+                }
+                dist > 8.0f -> {
+                    // Smoothly scale up for instant 180-degree flick turns
+                    val excess = (dist - 8.0f).coerceAtMost(25.0f) / 25.0f
+                    1.0f + (sCurveFlickBoost - 1.0f) * excess
+                }
+                else -> 1.0f
+            }
+            dx *= factor
+            dy *= factor
+        }
+
+        return Pair(dx, dy)
+    }
+
     // Toggle and Turbo State
     val latchedButtons = HashSet<String>()
     private val turboHandler = Handler(Looper.getMainLooper())
@@ -514,6 +559,12 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
             buttonTextOpacity = HudConfig.getButtonTextOpacity(context)
             areButtonsVisible = HudConfig.areButtonsVisible(context)
             currentSteeringMode = HudConfig.getSteeringMode(context)
+            isDpiNormalizationEnabled = HudConfig.isDpiNormalizationEnabled(context)
+            isJitterFilterEnabled = HudConfig.isJitterFilterEnabled(context)
+            jitterFilterThreshold = HudConfig.getJitterFilterThreshold(context)
+            aimCurveMode = HudConfig.getAimCurveMode(context)
+            sCurveDampening = HudConfig.getSCurveDampening(context)
+            sCurveFlickBoost = HudConfig.getSCurveFlickBoost(context)
             elements.addAll(HudConfig.loadLayout(context))
         }
         layoutReady = true
@@ -2302,10 +2353,9 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
                 }
             }
             "look" -> {
-                val dx = (x - lastLookX) * mouseSensitivity
-                val dy = (y - lastLookY) * mouseSensitivity
-                accumDx += dx
-                accumDy += dy
+                val (pDx, pDy) = processAimDelta((x - lastLookX) * mouseSensitivity, (y - lastLookY) * mouseSensitivity)
+                accumDx += pDx
+                accumDy += pDy
                 lastLookX = x
                 lastLookY = y
             }
@@ -2374,10 +2424,9 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
                 val lastX = buttonPointerLastX[id]
                 val lastY = buttonPointerLastY[id]
                 if (lastX != null && lastY != null) {
-                    val dx = (x - lastX) * mouseSensitivity
-                    val dy = (y - lastY) * mouseSensitivity
-                    accumDx += dx
-                    accumDy += dy
+                    val (pDx, pDy) = processAimDelta((x - lastX) * mouseSensitivity, (y - lastY) * mouseSensitivity)
+                    accumDx += pDx
+                    accumDy += pDy
                     buttonPointerLastX[id] = x
                     buttonPointerLastY[id] = y
                 }
@@ -3091,6 +3140,61 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
         selectedElement = null
         onElementSelected?.invoke(null)
         onLayoutChanged?.invoke()
+        invalidate()
+    }
+
+    fun updateSelectedOpacity(opacity: Float) {
+        selectedElement?.opacity = opacity
+        invalidate()
+    }
+
+    fun resetHeliStick() {
+        visualHeliStickX = 0f
+        visualHeliStickY = 0f
+        if (heli8Active) { heli8Active = false; onMacroKeyRequested?.invoke("8", false) }
+        if (heli5Active) { heli5Active = false; onMacroKeyRequested?.invoke("5", false) }
+        if (heli4Active) { heli4Active = false; onMacroKeyRequested?.invoke("4", false) }
+        if (heli6Active) { heli6Active = false; onMacroKeyRequested?.invoke("6", false) }
+        invalidate()
+    }
+
+    fun updateHeliStickDirectionKey(direction: String, key: String) {
+        val heliEl = elements.firstOrNull { it.id == "heli_stick" } ?: return
+        when (direction) {
+            "up" -> heliEl.dpadUpKey = key
+            "down" -> heliEl.dpadDownKey = key
+            "left" -> heliEl.dpadLeftKey = key
+            "right" -> heliEl.dpadRightKey = key
+        }
+        invalidate()
+    }
+
+    fun updateHeliStick(el: HudElement, x: Float, y: Float) {
+        val cx = el.xPct * width
+        val cy = el.yPct * height
+        val r = height * 0.16f * el.scale
+        val dx = (x - cx) / r
+        val dy = (y - cy) / r
+        val dist = hypot(dx.toDouble(), dy.toDouble()).toFloat()
+        val normX = if (dist > 1f) dx / dist else dx
+        val normY = if (dist > 1f) dy / dist else dy
+        visualHeliStickX = normX
+        visualHeliStickY = normY
+
+        val upKey = el.dpadUpKey.ifEmpty { "8" }
+        val downKey = el.dpadDownKey.ifEmpty { "5" }
+        val leftKey = el.dpadLeftKey.ifEmpty { "4" }
+        val rightKey = el.dpadRightKey.ifEmpty { "6" }
+
+        val needUp = normY < -0.35f
+        val needDown = normY > 0.35f
+        val needLeft = normX < -0.35f
+        val needRight = normX > 0.35f
+
+        if (needUp != heli8Active) { heli8Active = needUp; onMacroKeyRequested?.invoke(upKey, needUp) }
+        if (needDown != heli5Active) { heli5Active = needDown; onMacroKeyRequested?.invoke(downKey, needDown) }
+        if (needLeft != heli4Active) { heli4Active = needLeft; onMacroKeyRequested?.invoke(leftKey, needLeft) }
+        if (needRight != heli6Active) { heli6Active = needRight; onMacroKeyRequested?.invoke(rightKey, needRight) }
         invalidate()
     }
 
