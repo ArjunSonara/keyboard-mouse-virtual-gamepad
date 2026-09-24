@@ -1499,17 +1499,108 @@ class MainActivity : Activity(), SensorEventListener {
         }
 
         val linearBtn = Button(this).apply {
-            text = "🎯 Pure Linear 1:1\n★ Best for: Valorant / CS2"
-            textSize = 11f
+            text = "🎯 Linear 1:1\nValorant/CS2"
+            textSize = 10f
             paint.isFakeBoldText = true
-            setPadding(10, 12, 10, 12)
+            setPadding(6, 10, 6, 10)
+        }
+        val rawAccelBtn = Button(this).apply {
+            text = "🚀 RawAccel\n1:1 + 180° Flick"
+            textSize = 10f
+            paint.isFakeBoldText = true
+            setPadding(6, 10, 6, 10)
         }
         val scurveBtn = Button(this).apply {
-            text = "⚡ Dynamic S-Curve\n★ Best for: Warzone / Apex"
-            textSize = 11f
+            text = "⚡ S-Curve\nWarzone/Apex"
+            textSize = 10f
             paint.isFakeBoldText = true
-            setPadding(10, 12, 10, 12)
+            setPadding(6, 10, 6, 10)
         }
+
+        // Tweak panel for RawAccel
+        val rawAccelTweakLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, 10, 0, 4)
+            visibility = if (controllerView.aimCurveMode == AimCurveMode.RAW_ACCEL) View.VISIBLE else View.GONE
+        }
+
+        val rawThreshLabel = TextView(this).apply {
+            text = "1:1 Linear Precision Cutoff: ${String.format("%.1f", controllerView.rawAccelThreshold)} px (Swipes below this stay strict 1:1)"
+            setTextColor(Color.WHITE)
+            textSize = 11f
+            setPadding(0, 4, 0, 2)
+        }
+        rawAccelTweakLayout.addView(rawThreshLabel)
+
+        val rawThreshBar = SeekBar(this).apply {
+            max = 80 // 2.0 to 10.0 px
+            progress = ((controllerView.rawAccelThreshold - 2.0f) * 10).toInt().coerceIn(0, 80)
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar?, prog: Int, fromUser: Boolean) {
+                    val thresh = 2.0f + (prog / 10f)
+                    rawThreshLabel.text = "1:1 Linear Precision Cutoff: ${String.format("%.1f", thresh)} px (Swipes below this stay strict 1:1)"
+                    if (fromUser) {
+                        controllerView.rawAccelThreshold = thresh
+                        HudConfig.setRawAccelThreshold(this@MainActivity, thresh)
+                    }
+                }
+                override fun onStartTrackingTouch(sb: SeekBar?) {}
+                override fun onStopTrackingTouch(sb: SeekBar?) {}
+            })
+        }
+        rawAccelTweakLayout.addView(rawThreshBar)
+
+        val rawCapLabel = TextView(this).apply {
+            text = "180° Flick Boost Cap: ${String.format("%.2f", controllerView.rawAccelCap)}x (Max multiplier on fast flick)"
+            setTextColor(Color.WHITE)
+            textSize = 11f
+            setPadding(0, 8, 0, 2)
+        }
+        rawAccelTweakLayout.addView(rawCapLabel)
+
+        val rawCapBar = SeekBar(this).apply {
+            max = 225 // 1.25x to 3.50x
+            progress = ((controllerView.rawAccelCap - 1.25f) * 100).toInt().coerceIn(0, 225)
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar?, prog: Int, fromUser: Boolean) {
+                    val cap = 1.25f + (prog / 100f)
+                    rawCapLabel.text = "180° Flick Boost Cap: ${String.format("%.2f", cap)}x (Max multiplier on fast flick)"
+                    if (fromUser) {
+                        controllerView.rawAccelCap = cap
+                        HudConfig.setRawAccelCap(this@MainActivity, cap)
+                    }
+                }
+                override fun onStartTrackingTouch(sb: SeekBar?) {}
+                override fun onStopTrackingTouch(sb: SeekBar?) {}
+            })
+        }
+        rawAccelTweakLayout.addView(rawCapBar)
+
+        val rawGainLabel = TextView(this).apply {
+            text = "Acceleration Curve Rate: ${String.format("%.3f", controllerView.rawAccelGain)} (Ramp speed)"
+            setTextColor(Color.WHITE)
+            textSize = 11f
+            setPadding(0, 8, 0, 2)
+        }
+        rawAccelTweakLayout.addView(rawGainLabel)
+
+        val rawGainBar = SeekBar(this).apply {
+            max = 130 // 0.020 to 0.150
+            progress = ((controllerView.rawAccelGain - 0.020f) * 1000).toInt().coerceIn(0, 130)
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar?, prog: Int, fromUser: Boolean) {
+                    val gain = 0.020f + (prog / 1000f)
+                    rawGainLabel.text = "Acceleration Curve Rate: ${String.format("%.3f", gain)} (Ramp speed)"
+                    if (fromUser) {
+                        controllerView.rawAccelGain = gain
+                        HudConfig.setRawAccelGain(this@MainActivity, gain)
+                    }
+                }
+                override fun onStartTrackingTouch(sb: SeekBar?) {}
+                override fun onStopTrackingTouch(sb: SeekBar?) {}
+            })
+        }
+        rawAccelTweakLayout.addView(rawGainBar)
 
         // Tweak panel for S-Curve
         val tweakLayout = LinearLayout(this).apply {
@@ -1578,18 +1669,26 @@ class MainActivity : Activity(), SensorEventListener {
         }
 
         fun updateCurveButtons() {
-            val isLinear = controllerView.aimCurveMode == AimCurveMode.LINEAR
-            linearBtn.background = createCardDrawable(if (isLinear) Color.parseColor("#1F6FEB") else Color.parseColor("#21262D"), 12f)
-            linearBtn.setTextColor(if (isLinear) Color.WHITE else Color.parseColor("#8B949E"))
+            val mode = controllerView.aimCurveMode
+            linearBtn.background = createCardDrawable(if (mode == AimCurveMode.LINEAR) Color.parseColor("#1F6FEB") else Color.parseColor("#21262D"), 10f)
+            linearBtn.setTextColor(if (mode == AimCurveMode.LINEAR) Color.WHITE else Color.parseColor("#8B949E"))
 
-            scurveBtn.background = createCardDrawable(if (!isLinear) Color.parseColor("#8A2BE2") else Color.parseColor("#21262D"), 12f)
-            scurveBtn.setTextColor(if (!isLinear) Color.WHITE else Color.parseColor("#8B949E"))
+            rawAccelBtn.background = createCardDrawable(if (mode == AimCurveMode.RAW_ACCEL) Color.parseColor("#238636") else Color.parseColor("#21262D"), 10f)
+            rawAccelBtn.setTextColor(if (mode == AimCurveMode.RAW_ACCEL) Color.WHITE else Color.parseColor("#8B949E"))
 
-            tweakLayout.visibility = if (isLinear) View.GONE else View.VISIBLE
-            modeDesc.text = if (isLinear) {
-                "• Mode A (Linear 1:1): Strict raw input. Fast or slow, 2cm swipe = exact same crosshair degrees every single time. Unshakeable muscle memory for tactical flick headshots."
-            } else {
-                "• Mode B (Dynamic S-Curve): Smoothly dampens micro-movements for sniper tracking, while fast thumb swipes scale up so you can do 180° turns without running out of screen glass."
+            scurveBtn.background = createCardDrawable(if (mode == AimCurveMode.S_CURVE) Color.parseColor("#8A2BE2") else Color.parseColor("#21262D"), 10f)
+            scurveBtn.setTextColor(if (mode == AimCurveMode.S_CURVE) Color.WHITE else Color.parseColor("#8B949E"))
+
+            rawAccelTweakLayout.visibility = if (mode == AimCurveMode.RAW_ACCEL) View.VISIBLE else View.GONE
+            tweakLayout.visibility = if (mode == AimCurveMode.S_CURVE) View.VISIBLE else View.GONE
+
+            modeDesc.text = when (mode) {
+                AimCurveMode.LINEAR ->
+                    "• Mode A (Linear 1:1): Strict raw input. Fast or slow, 2cm swipe = exact same crosshair degrees every single time. Unshakeable muscle memory for tactical flick headshots."
+                AimCurveMode.RAW_ACCEL ->
+                    "• Mode B (RawAccel Natural): Slow micro-aim (< 4px) is strictly 1:1 raw linear for pixel-precise headshots, while fast thumb flicks smoothly accelerate up to 2.25x so you can execute instant 180° turns without running out of screen glass."
+                AimCurveMode.S_CURVE ->
+                    "• Mode C (Dynamic S-Curve): Smoothly dampens micro-movements for sniper tracking, while fast thumb swipes scale up for 180° turns."
             }
         }
 
@@ -1599,6 +1698,12 @@ class MainActivity : Activity(), SensorEventListener {
             updateCurveButtons()
             Toast.makeText(this@MainActivity, "🎯 Mode: Pure Linear 1:1 Active", Toast.LENGTH_SHORT).show()
         }
+        rawAccelBtn.setOnClickListener {
+            controllerView.aimCurveMode = AimCurveMode.RAW_ACCEL
+            HudConfig.setAimCurveMode(this@MainActivity, AimCurveMode.RAW_ACCEL)
+            updateCurveButtons()
+            Toast.makeText(this@MainActivity, "🚀 Mode: RawAccel Natural Aim Curve Active", Toast.LENGTH_SHORT).show()
+        }
         scurveBtn.setOnClickListener {
             controllerView.aimCurveMode = AimCurveMode.S_CURVE
             HudConfig.setAimCurveMode(this@MainActivity, AimCurveMode.S_CURVE)
@@ -1607,14 +1712,93 @@ class MainActivity : Activity(), SensorEventListener {
         }
 
         updateCurveButtons()
-        curveRow.addView(linearBtn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = 8 })
+        curveRow.addView(linearBtn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = 6 })
+        curveRow.addView(rawAccelBtn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = 6 })
         curveRow.addView(scurveBtn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
         curveCard.addView(curveRow)
         curveCard.addView(modeDesc)
+        curveCard.addView(rawAccelTweakLayout)
         curveCard.addView(tweakLayout)
         layout.addView(curveCard, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { bottomMargin = 16 })
 
-        // --- Feature 4: 1000Hz Ultra-Polling Touch Pipeline (MotionEvent.HISTORY Batching) ---
+        // --- Feature 4: Clean Lift-off Finger Release Guard ---
+        val liftoffCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = createCardDrawable(Color.parseColor("#161B22"), 14f)
+            setPadding(20, 16, 20, 16)
+        }
+        val liftoffHeader = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val liftoffTitleLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        val liftoffTitle = TextView(this).apply {
+            text = "🎯 Clean Lift-off Finger Release Guard"
+            setTextColor(Color.parseColor("#79C0FF"))
+            textSize = 14f
+            paint.isFakeBoldText = true
+        }
+        val liftoffBadge = TextView(this).apply {
+            text = if (controllerView.isCleanLiftoffEnabled) "● Anti-Twitch Guard Active (Crosshair Freezes on Release)" else "○ Guard Disabled (Raw Release)"
+            setTextColor(if (controllerView.isCleanLiftoffEnabled) Color.parseColor("#7EE787") else Color.parseColor("#8B949E"))
+            textSize = 11f
+        }
+        liftoffTitleLayout.addView(liftoffTitle)
+        liftoffTitleLayout.addView(liftoffBadge)
+        liftoffHeader.addView(liftoffTitleLayout)
+
+        val liftoffSwitch = Switch(this).apply {
+            isChecked = controllerView.isCleanLiftoffEnabled
+            setOnCheckedChangeListener { _, isChecked ->
+                controllerView.isCleanLiftoffEnabled = isChecked
+                HudConfig.setCleanLiftoffEnabled(this@MainActivity, isChecked)
+                liftoffBadge.text = if (isChecked) "● Anti-Twitch Guard Active (Crosshair Freezes on Release)" else "○ Guard Disabled (Raw Release)"
+                liftoffBadge.setTextColor(if (isChecked) Color.parseColor("#7EE787") else Color.parseColor("#8B949E"))
+                Toast.makeText(this@MainActivity, if (isChecked) "🎯 Clean Lift-off Guard: ON" else "Clean Lift-off Guard: OFF", Toast.LENGTH_SHORT).show()
+            }
+        }
+        liftoffHeader.addView(liftoffSwitch)
+        liftoffCard.addView(liftoffHeader)
+
+        val liftoffDesc = TextView(this).apply {
+            text = "Eliminates the involuntary 1–3 pixel crosshair jerk caused by thumb skin peeling off the glass during finger release (ACTION_UP). When lifting your finger after holding an angle or making a micro-adjustment, the crosshair remains locked dead-center on the target without flinching."
+            setTextColor(Color.parseColor("#8B949E"))
+            textSize = 11f
+            setPadding(0, 6, 0, 8)
+        }
+        liftoffCard.addView(liftoffDesc)
+
+        val liftoffThreshLabel = TextView(this).apply {
+            text = "Jerk Suppression Threshold: ${String.format("%.1f", controllerView.cleanLiftoffThreshold)} px (Default: 3.5 px)"
+            setTextColor(Color.WHITE)
+            textSize = 12f
+            setPadding(0, 4, 0, 4)
+        }
+        liftoffCard.addView(liftoffThreshLabel)
+
+        val liftoffThreshBar = SeekBar(this).apply {
+            max = 70 // 1.0 to 8.0 px
+            progress = ((controllerView.cleanLiftoffThreshold - 1.0f) * 10).toInt().coerceIn(0, 70)
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar?, prog: Int, fromUser: Boolean) {
+                    val t = 1.0f + (prog / 10f)
+                    liftoffThreshLabel.text = "Jerk Suppression Threshold: ${String.format("%.1f", t)} px (Default: 3.5 px)"
+                    if (fromUser) {
+                        controllerView.cleanLiftoffThreshold = t
+                        HudConfig.setCleanLiftoffThreshold(this@MainActivity, t)
+                    }
+                }
+                override fun onStartTrackingTouch(sb: SeekBar?) {}
+                override fun onStopTrackingTouch(sb: SeekBar?) {}
+            })
+        }
+        liftoffCard.addView(liftoffThreshBar)
+        layout.addView(liftoffCard, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { bottomMargin = 16 })
+
+        // --- Feature 5: 1000Hz Ultra-Polling Touch Pipeline (MotionEvent.HISTORY Batching) ---
         val pollingCard = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             background = createCardDrawable(Color.parseColor("#161B22"), 14f)

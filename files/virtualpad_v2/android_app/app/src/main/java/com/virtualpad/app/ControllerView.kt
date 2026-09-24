@@ -369,9 +369,17 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
     var isDpiNormalizationEnabled = true
     var isJitterFilterEnabled = true
     var jitterFilterThreshold = 0.15f
+    var isCleanLiftoffEnabled = true
+    var cleanLiftoffThreshold = 3.5f
     var aimCurveMode = AimCurveMode.LINEAR
     var sCurveDampening = 0.75f
     var sCurveFlickBoost = 1.35f
+    var rawAccelThreshold = 4.0f
+    var rawAccelGain = 0.06f
+    var rawAccelCap = 2.25f
+
+    // Clean Lift-off Tracking: maps pointerId -> (lastDeltaX, lastDeltaY, timestampMs)
+    private val lastPointerAimDelta = HashMap<Int, Triple<Float, Float, Long>>()
 
     private val dpiScaleFactor: Float by lazy {
         val xdpi = context.resources.displayMetrics.xdpi
@@ -395,21 +403,37 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
         }
 
         // 3. Aim Response Curve Profile
-        if (aimCurveMode == AimCurveMode.S_CURVE) {
-            val factor = when {
-                dist < 3.0f -> {
-                    // Smoothly blend from sCurveDampening up to 1.0f for sniper micro-adjustments
-                    sCurveDampening + (1.0f - sCurveDampening) * (dist / 3.0f)
-                }
-                dist > 8.0f -> {
-                    // Smoothly scale up for instant 180-degree flick turns
-                    val excess = (dist - 8.0f).coerceAtMost(25.0f) / 25.0f
-                    1.0f + (sCurveFlickBoost - 1.0f) * excess
-                }
-                else -> 1.0f
+        when (aimCurveMode) {
+            AimCurveMode.LINEAR -> {
+                // Pure 1:1 raw linear pass-through (Valorant / CS2)
             }
-            dx *= factor
-            dy *= factor
+            AimCurveMode.RAW_ACCEL -> {
+                // RawAccel Natural Aim Curve:
+                // - Below rawAccelThreshold (default 4.0px): strict 1:1 linear input (pure muscle memory)
+                // - Above rawAccelThreshold: smooth power-curve acceleration for effortless 180° flick turns
+                if (dist > rawAccelThreshold) {
+                    val excess = dist - rawAccelThreshold
+                    val gain = 1.0f + (rawAccelGain * excess).coerceAtMost(rawAccelCap - 1.0f)
+                    dx *= gain
+                    dy *= gain
+                }
+            }
+            AimCurveMode.S_CURVE -> {
+                val factor = when {
+                    dist < 3.0f -> {
+                        // Smoothly blend from sCurveDampening up to 1.0f for sniper micro-adjustments
+                        sCurveDampening + (1.0f - sCurveDampening) * (dist / 3.0f)
+                    }
+                    dist > 8.0f -> {
+                        // Smoothly scale up for instant 180-degree flick turns
+                        val excess = (dist - 8.0f).coerceAtMost(25.0f) / 25.0f
+                        1.0f + (sCurveFlickBoost - 1.0f) * excess
+                    }
+                    else -> 1.0f
+                }
+                dx *= factor
+                dy *= factor
+            }
         }
 
         return Pair(dx, dy)
@@ -550,6 +574,11 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
         aimCurveMode = HudConfig.getAimCurveMode(context)
         sCurveDampening = HudConfig.getSCurveDampening(context)
         sCurveFlickBoost = HudConfig.getSCurveFlickBoost(context)
+        isCleanLiftoffEnabled = HudConfig.isCleanLiftoffEnabled(context)
+        cleanLiftoffThreshold = HudConfig.getCleanLiftoffThreshold(context)
+        rawAccelThreshold = HudConfig.getRawAccelThreshold(context)
+        rawAccelGain = HudConfig.getRawAccelGain(context)
+        rawAccelCap = HudConfig.getRawAccelCap(context)
         elements.addAll(HudConfig.loadLayout(context))
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
             try {
@@ -635,6 +664,11 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
             aimCurveMode = HudConfig.getAimCurveMode(context)
             sCurveDampening = HudConfig.getSCurveDampening(context)
             sCurveFlickBoost = HudConfig.getSCurveFlickBoost(context)
+            isCleanLiftoffEnabled = HudConfig.isCleanLiftoffEnabled(context)
+            cleanLiftoffThreshold = HudConfig.getCleanLiftoffThreshold(context)
+            rawAccelThreshold = HudConfig.getRawAccelThreshold(context)
+            rawAccelGain = HudConfig.getRawAccelGain(context)
+            rawAccelCap = HudConfig.getRawAccelCap(context)
             elements.addAll(HudConfig.loadLayout(context))
         }
         layoutReady = true
@@ -2447,6 +2481,9 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
                 accumDy += pDy
                 lastLookX = x
                 lastLookY = y
+                if (isCleanLiftoffEnabled) {
+                    lastPointerAimDelta[id] = Triple(pDx, pDy, System.currentTimeMillis())
+                }
             }
             else -> {
                 // Button Swipe-to-Aim & Visual Drag Tracking
@@ -2518,12 +2555,34 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
                     accumDy += pDy
                     buttonPointerLastX[id] = x
                     buttonPointerLastY[id] = y
+                    if (isCleanLiftoffEnabled) {
+                        lastPointerAimDelta[id] = Triple(pDx, pDy, System.currentTimeMillis())
+                    }
                 }
             }
         }
     }
 
     private fun handlePointerUp(id: Int) {
+        if (isCleanLiftoffEnabled && isEsportsAimEngineEnabled) {
+            val deltaInfo = lastPointerAimDelta.remove(id)
+            if (deltaInfo != null) {
+                val (lastDx, lastDy, lastTime) = deltaInfo
+                val now = System.currentTimeMillis()
+                // If the finger was lifted within 40ms of the last delta report and it was a micro-movement:
+                if (now - lastTime <= 40L) {
+                    val microDist = hypot(lastDx.toDouble(), lastDy.toDouble()).toFloat()
+                    if (microDist > 0f && microDist <= cleanLiftoffThreshold) {
+                        // Clean Lift-off Guard: Roll back the involuntary thumb-skin peel-off twitch!
+                        accumDx -= lastDx
+                        accumDy -= lastDy
+                    }
+                }
+            }
+        } else {
+            lastPointerAimDelta.remove(id)
+        }
+
         val zone = pointerZone[id]
         when (zone) {
             "steer_mode" -> {
@@ -2863,6 +2922,7 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
         isStickInLockNotch = false
         autoShiftActive = false
         lookPointerId = null
+        lastPointerAimDelta.clear()
         accumDx = 0f
         accumDy = 0f
         state = ControllerState()

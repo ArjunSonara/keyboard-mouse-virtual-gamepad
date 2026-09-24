@@ -21,6 +21,7 @@ enum class SteeringMode(val id: Int, val displayName: String) {
 
 enum class AimCurveMode {
     LINEAR,
+    RAW_ACCEL,
     S_CURVE
 }
 
@@ -1709,6 +1710,55 @@ object HudConfig {
 
     fun setSCurveFlickBoost(context: Context, boost: Float) {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit().putFloat(KEY_SCURVE_FLICK_BOOST, boost).apply()
+    }
+
+    // Clean Lift-off Finger Release Guard
+    private const val KEY_CLEAN_LIFTOFF_ENABLED = "clean_liftoff_enabled"
+    private const val KEY_CLEAN_LIFTOFF_THRESHOLD = "clean_liftoff_threshold"
+
+    fun isCleanLiftoffEnabled(context: Context): Boolean {
+        return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getBoolean(KEY_CLEAN_LIFTOFF_ENABLED, true)
+    }
+
+    fun setCleanLiftoffEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit().putBoolean(KEY_CLEAN_LIFTOFF_ENABLED, enabled).apply()
+    }
+
+    fun getCleanLiftoffThreshold(context: Context): Float {
+        return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getFloat(KEY_CLEAN_LIFTOFF_THRESHOLD, 3.5f)
+    }
+
+    fun setCleanLiftoffThreshold(context: Context, threshold: Float) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit().putFloat(KEY_CLEAN_LIFTOFF_THRESHOLD, threshold).apply()
+    }
+
+    // RawAccel Natural Aim Curve
+    private const val KEY_RAW_ACCEL_THRESHOLD = "raw_accel_threshold"
+    private const val KEY_RAW_ACCEL_GAIN = "raw_accel_gain"
+    private const val KEY_RAW_ACCEL_CAP = "raw_accel_cap"
+
+    fun getRawAccelThreshold(context: Context): Float {
+        return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getFloat(KEY_RAW_ACCEL_THRESHOLD, 4.0f)
+    }
+
+    fun setRawAccelThreshold(context: Context, threshold: Float) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit().putFloat(KEY_RAW_ACCEL_THRESHOLD, threshold).apply()
+    }
+
+    fun getRawAccelGain(context: Context): Float {
+        return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getFloat(KEY_RAW_ACCEL_GAIN, 0.06f)
+    }
+
+    fun setRawAccelGain(context: Context, gain: Float) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit().putFloat(KEY_RAW_ACCEL_GAIN, gain).apply()
+    }
+
+    fun getRawAccelCap(context: Context): Float {
+        return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getFloat(KEY_RAW_ACCEL_CAP, 2.25f)
+    }
+
+    fun setRawAccelCap(context: Context, cap: Float) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit().putFloat(KEY_RAW_ACCEL_CAP, cap).apply()
     }
 
     // Gyroscope
