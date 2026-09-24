@@ -209,7 +209,19 @@ MOUSE_EVENT_FLAGS = {
 }
 
 
+KEY_ALIASES = {
+    "numpad0": "num0", "numpad1": "num1", "numpad2": "num2",
+    "numpad3": "num3", "numpad4": "num4", "numpad5": "num5",
+    "numpad6": "num6", "numpad7": "num7", "numpad8": "num8",
+    "numpad9": "num9", "num_0": "num0", "num_1": "num1",
+    "num_2": "num2", "num_3": "num3", "num_4": "num4",
+    "num_5": "num5", "num_6": "num6", "num_7": "num7",
+    "num_8": "num8", "num_9": "num9",
+}
+
+
 def _actually_set_key(key: str, should_hold: bool):
+    key = KEY_ALIASES.get(key.lower(), key.lower())
     is_held = key in _held_ctx
     mouse_btn = MOUSE_BUTTON_MAP.get(key.lower())
 
@@ -475,6 +487,11 @@ def tcp_listener():
             conn, _ = sock.accept()
             try:
                 conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                conn.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+                try:
+                    conn.ioctl(socket.SIO_KEEPALIVE_VALS, (1, 5000, 1000))
+                except Exception:
+                    pass
                 print("[USB/TCP] phone connected over USB")
                 buf = bytearray()
                 while True:
@@ -485,11 +502,18 @@ def tcp_listener():
                     # Frame format: 2-byte little endian unsigned short (length) + payload
                     while len(buf) >= 2:
                         packet_len = struct.unpack("<H", buf[:2])[0]
+                        if packet_len > 4096 or packet_len == 0:
+                            # Framing desynchronization guard: discard first byte
+                            del buf[0]
+                            continue
                         if len(buf) < 2 + packet_len:
                             break  # Wait for remaining packet payload to arrive
                         payload = bytes(buf[2 : 2 + packet_len])
                         del buf[: 2 + packet_len]
-                        dispatch_packet(payload)
+                        try:
+                            dispatch_packet(payload)
+                        except Exception as ex:
+                            print(f"[Input Error] {ex}", flush=True)
             finally:
                 try:
                     conn.close()
@@ -636,31 +660,43 @@ def get_adb_bin():
             continue
     return None
 
+_adb_fail_count = 0
+
 def auto_adb_reverse():
     """
     Automatically detects connected USB Android devices and runs
     adb reverse tcp:PORT tcp:PORT so the user never needs to type it manually.
     """
-    global _last_reversed_devices
+    global _last_reversed_devices, _adb_fail_count
     adb_bin = get_adb_bin()
     if not adb_bin:
         return
 
     try:
-        r = silent_run([adb_bin, "devices"], capture_output=True, text=True, timeout=10)
-        lines = r.stdout.splitlines()
-        devs = set([line.split("\t")[0].strip() for line in lines if "\tdevice" in line])
+        r = silent_run([adb_bin, "devices"], capture_output=True, text=True, timeout=8)
+        lines = r.stdout.splitlines() if r.returncode == 0 else []
+        all_devs = [line.split("\t")[0].strip() for line in lines if "\tdevice" in line]
+        physical_devs = [d for d in all_devs if not d.startswith("emulator-")]
+        devs = physical_devs if physical_devs else all_devs
+
         if devs:
-            rev_list = silent_run([adb_bin, "reverse", "--list"], capture_output=True, text=True, timeout=5)
+            _adb_fail_count = 0
+            target_dev = devs[0]
+            rev_list = silent_run([adb_bin, "-s", target_dev, "reverse", "--list"], capture_output=True, text=True, timeout=5)
             is_reversed = f"tcp:{PORT}" in (rev_list.stdout or "")
 
-            if not is_reversed or devs != _last_reversed_devices:
-                rev = silent_run([adb_bin, "reverse", f"tcp:{PORT}", f"tcp:{PORT}"], capture_output=True, text=True, timeout=8)
-                if rev.returncode == 0:
-                    _last_reversed_devices = devs
-                    print(f"[Auto-USB] Port forwarded! (adb reverse tcp:{PORT} tcp:{PORT} active for {len(devs)} device)")
+            if is_reversed and set(devs) == _last_reversed_devices:
+                return
+
+            rev = silent_run([adb_bin, "-s", target_dev, "reverse", f"tcp:{PORT}", f"tcp:{PORT}"], capture_output=True, text=True, timeout=5)
+            if rev.returncode == 0 or is_reversed:
+                _last_reversed_devices = set(devs)
+                print(f"[Auto-USB] Port forwarded! (adb reverse tcp:{PORT} tcp:{PORT} active for {target_dev})")
             return
-        _last_reversed_devices.clear()
+
+        _adb_fail_count += 1
+        if _adb_fail_count >= 3:
+            _last_reversed_devices.clear()
     except Exception:
         pass
 

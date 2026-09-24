@@ -46,6 +46,7 @@ class AudioMirrorClient {
                         receiveBufferSize = 8 * 1024
                         connect(InetSocketAddress(host, AUDIO_PORT), 3000)
                         tcpNoDelay = true
+                        keepAlive = true
                         soTimeout = 8000
                     }
                     audioSocket = socket

@@ -28,3 +28,4 @@ desktop.ini
 antigravity-memory-bank/
 memory-bank/
 *.png
+!files/virtualpad_v2/android_app/app/src/main/res/**/*.png

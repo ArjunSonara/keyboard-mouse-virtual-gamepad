@@ -48,6 +48,8 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.google.zxing.integration.android.IntentIntegrator
 import com.google.zxing.integration.android.IntentResult
+import android.os.PowerManager
+import android.net.wifi.WifiManager
 import java.util.Locale
 import kotlin.math.abs
 
@@ -59,6 +61,8 @@ class MainActivity : Activity(), SensorEventListener {
     private lateinit var networkClient: NetworkClient
     private lateinit var prefs: android.content.SharedPreferences
     private lateinit var gearButton: Button
+    private var wakeLock: PowerManager.WakeLock? = null
+    private var wifiLock: WifiManager.WifiLock? = null
 
     // PCMirror Streaming & Viewport Modules
     private lateinit var surfaceView: SurfaceView
@@ -98,6 +102,8 @@ class MainActivity : Activity(), SensorEventListener {
     private lateinit var inspectorTitle: TextView
     private lateinit var scaleText: TextView
     private lateinit var scaleSeekBar: SeekBar
+    private lateinit var opacityText: TextView
+    private lateinit var opacitySeekBar: SeekBar
     private lateinit var bindKeyButton: Button
     private lateinit var shapeButton: Button
     private lateinit var deleteButton: Button
@@ -165,6 +171,23 @@ class MainActivity : Activity(), SensorEventListener {
                 android.util.Log.w("VirtualPad", "Could not lock 120Hz display mode: ${e.message}")
             }
         }
+
+        // Acquire CPU and High-Perf Wi-Fi Locks to prevent mid-session OS throttling or Doze sleep
+        try {
+            val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager
+            wakeLock = pm?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "VirtualPad:StreamWakeLock")?.apply {
+                acquire(24 * 60 * 60 * 1000L) // 24h safety timeout
+            }
+            val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+            val lockMode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+            } else {
+                WifiManager.WIFI_MODE_FULL_HIGH_PERF
+            }
+            wifiLock = wm?.createWifiLock(lockMode, "VirtualPad:StreamWifiLock")?.apply {
+                acquire()
+            }
+        } catch (_: Exception) {}
 
         prefs = getSharedPreferences("virtualpad", Context.MODE_PRIVATE)
         isMirroringEnabled = prefs.getBoolean("mirroring_enabled", true)
@@ -280,15 +303,26 @@ class MainActivity : Activity(), SensorEventListener {
 
         // Top-Right: Gamepad Gear (VirtualPad Controls)
         gearButton = Button(this).apply {
-            text = "⚙ PAD"
             textSize = 12f
             paint.isFakeBoldText = true
-            setTextColor(Color.WHITE)
             alpha = 0.85f
-            background = createCardDrawable(Color.parseColor("#880D1117"), 22f, Color.parseColor("#58A6FF"), 2)
             setPadding(16, 0, 16, 0)
             setOnClickListener { showSettingsDialog() }
+            setOnLongClickListener {
+                val newState = !controllerView.areButtonsVisible
+                controllerView.areButtonsVisible = newState
+                HudConfig.setButtonsVisible(this@MainActivity, newState)
+                updatePadGearButtonState()
+                controllerView.hapticHelper.heavyClick()
+                Toast.makeText(
+                    this@MainActivity,
+                    if (newState) "🎮 All buttons visible" else "👁️ All buttons hidden (Screen View Only) - tap ⚙ PAD to restore",
+                    Toast.LENGTH_SHORT
+                ).show()
+                true
+            }
         }
+        updatePadGearButtonState()
         val gearParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, 80).apply {
             gravity = Gravity.TOP or Gravity.END
             topMargin = 16
@@ -478,7 +512,30 @@ class MainActivity : Activity(), SensorEventListener {
         "mouse_left", "lmb" -> "LMB"
         "mouse_right", "rmb" -> "RMB"
         "mouse_middle", "mmb" -> "MMB"
+        "num8" -> "NUM 8"
+        "num4" -> "NUM 4"
+        "num5" -> "NUM 5"
+        "num6" -> "NUM 6"
+        "num7" -> "NUM 7"
+        "num9" -> "NUM 9"
+        "num1" -> "NUM 1"
+        "num2" -> "NUM 2"
+        "num3" -> "NUM 3"
+        "num0" -> "NUM 0"
         else -> key.uppercase()
+    }
+
+    private fun updatePadGearButtonState() {
+        if (!::gearButton.isInitialized) return
+        if (controllerView.areButtonsVisible) {
+            gearButton.text = "⚙ PAD"
+            gearButton.setTextColor(Color.WHITE)
+            gearButton.background = createCardDrawable(Color.parseColor("#880D1117"), 22f, Color.parseColor("#58A6FF"), 2)
+        } else {
+            gearButton.text = "⚙ PAD (OFF)"
+            gearButton.setTextColor(Color.parseColor("#FFA500"))
+            gearButton.background = createCardDrawable(Color.parseColor("#880D1117"), 22f, Color.parseColor("#FFA500"), 2)
+        }
     }
 
     // -------------------------------------------------------------------
@@ -530,6 +587,124 @@ class MainActivity : Activity(), SensorEventListener {
         }
         actionsRow.addView(connSetupBtn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
         layout.addView(actionsRow)
+
+        // Section: Virtual Gamepad Buttons (Show / Hide All Buttons)
+        val buttonsCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = createCardDrawable(Color.parseColor("#161B22"), 14f)
+            setPadding(24, 20, 24, 20)
+        }
+        val buttonsHeader = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val buttonsTitle = TextView(this).apply {
+            text = "🎮 Virtual Gamepad Buttons"
+            setTextColor(Color.parseColor("#58A6FF"))
+            textSize = 14f
+            paint.isFakeBoldText = true
+        }
+        buttonsHeader.addView(buttonsTitle, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+
+        val buttonsSwitch = Switch(this).apply {
+            isChecked = controllerView.areButtonsVisible
+            setOnCheckedChangeListener { _, isChecked ->
+                controllerView.areButtonsVisible = isChecked
+                HudConfig.setButtonsVisible(this@MainActivity, isChecked)
+                updatePadGearButtonState()
+                Toast.makeText(
+                    this@MainActivity,
+                    if (isChecked) "🎮 All buttons visible" else "👁️ All buttons hidden (Screen View Only) - tap ⚙ PAD to restore",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+        }
+        buttonsHeader.addView(buttonsSwitch)
+        buttonsCard.addView(buttonsHeader)
+
+        val buttonsDesc = TextView(this).apply {
+            text = "Turn OFF to completely hide all on-screen buttons, sticks, and D-pad so you can view the screen cleanly without any buttons. Tap ⚙ PAD anytime (or long-press ⚙ PAD) to turn them back on."
+            setTextColor(Color.parseColor("#8B949E"))
+            textSize = 12f
+            setPadding(0, 6, 0, 0)
+        }
+        buttonsCard.addView(buttonsDesc)
+        layout.addView(buttonsCard, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+            bottomMargin = 16
+        })
+
+        // Section: Vehicle Steering Mode
+        val steeringCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = createCardDrawable(Color.parseColor("#161B22"), 14f)
+            setPadding(24, 20, 24, 20)
+        }
+        val steeringTitle = TextView(this).apply {
+            text = "🚗 Steering Mode"
+            setTextColor(Color.parseColor("#58A6FF"))
+            textSize = 14f
+            paint.isFakeBoldText = true
+            setPadding(0, 0, 0, 10)
+        }
+        steeringCard.addView(steeringTitle)
+
+        val steeringModesRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, 4, 0, 8)
+        }
+
+        val modeButtons = mutableListOf<Button>()
+        val steeringOptions = listOf(
+            Pair(SteeringMode.OFF, "Normal Stick"),
+            Pair(SteeringMode.PEDALS, "Pedals & Arrows"),
+            Pair(SteeringMode.WHEEL, "Steering Wheel"),
+            Pair(SteeringMode.HELICOPTER, "Helicopter (8/4/5/6)")
+        )
+
+        fun updateSteeringButtonStyles() {
+            steeringOptions.forEachIndexed { index, (m, _) ->
+                val btn = modeButtons[index]
+                val isSelected = controllerView.currentSteeringMode == m
+                btn.background = createCardDrawable(
+                    if (isSelected) Color.parseColor("#1F6FEB") else Color.parseColor("#21262D"),
+                    12f
+                )
+                btn.setTextColor(if (isSelected) Color.WHITE else Color.parseColor("#8B949E"))
+            }
+        }
+
+        steeringOptions.forEachIndexed { index, (m, title) ->
+            val btn = Button(this).apply {
+                text = title
+                textSize = 10f
+                setPadding(8, 10, 8, 10)
+                setOnClickListener {
+                    controllerView.currentSteeringMode = m
+                    HudConfig.setSteeringMode(this@MainActivity, m)
+                    updateSteeringButtonStyles()
+                }
+            }
+            modeButtons.add(btn)
+            steeringModesRow.addView(
+                btn,
+                LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                    rightMargin = if (index < steeringOptions.size - 1) 6 else 0
+                }
+            )
+        }
+        updateSteeringButtonStyles()
+        steeringCard.addView(steeringModesRow)
+
+        val steeringDesc = TextView(this).apply {
+            text = "Swap the left joystick with racing pedals (W/S) + steer arrows (A/D), an interactive rotatable Steering Wheel, or Helicopter flight keys (8/4/5/6)! You can also hold the 🚗 STEER button on-screen to quick-switch."
+            setTextColor(Color.parseColor("#8B949E"))
+            textSize = 12f
+            setPadding(0, 4, 0, 0)
+        }
+        steeringCard.addView(steeringDesc)
+        layout.addView(steeringCard, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+            bottomMargin = 16
+        })
 
         // Section: Screen Mirroring Toggle
         val mirrorCard = LinearLayout(this).apply {
@@ -1623,7 +1798,29 @@ class MainActivity : Activity(), SensorEventListener {
                 override fun onStopTrackingTouch(seekBar: SeekBar?) {}
             })
         }
-        scaleRow.addView(scaleSeekBar, LinearLayout.LayoutParams(320, LinearLayout.LayoutParams.WRAP_CONTENT).apply { leftMargin = 12 })
+        scaleRow.addView(scaleSeekBar, LinearLayout.LayoutParams(260, LinearLayout.LayoutParams.WRAP_CONTENT).apply { leftMargin = 10 })
+
+        opacityText = TextView(this).apply {
+            text = "Opacity: 100%"
+            setTextColor(Color.WHITE)
+            textSize = 13f
+        }
+        scaleRow.addView(opacityText, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { leftMargin = 20 })
+
+        opacitySeekBar = SeekBar(this).apply {
+            max = 100
+            progress = 100
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                    val opacity = progress / 100f
+                    opacityText.text = "Opacity: ${progress}%"
+                    if (fromUser) controllerView.updateSelectedOpacity(opacity)
+                }
+                override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+                override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+            })
+        }
+        scaleRow.addView(opacitySeekBar, LinearLayout.LayoutParams(240, LinearLayout.LayoutParams.WRAP_CONTENT).apply { leftMargin = 10 })
         bottomInspector.addView(scaleRow)
 
         // 2. Button-Specific Controls Row (Key Binding, Shape, Delete)
@@ -1856,6 +2053,9 @@ class MainActivity : Activity(), SensorEventListener {
         if (el == null) {
             inspectorTitle.text = "Tap any button on screen to select and adjust"
             scaleSeekBar.isEnabled = false
+            opacitySeekBar.isEnabled = false
+            opacitySeekBar.progress = 100
+            opacityText.text = "Opacity: 100%"
             buttonControlsRow.visibility = View.VISIBLE
             dpadControlsRow.visibility = View.GONE
             bindKeyButton.isEnabled = false
@@ -1878,6 +2078,11 @@ class MainActivity : Activity(), SensorEventListener {
             scaleSeekBar.isEnabled = true
             scaleSeekBar.progress = (el.scale * 100).toInt()
             scaleText.text = "Size: ${String.format("%.2f", el.scale)}x"
+
+            opacitySeekBar.isEnabled = true
+            val opPct = (el.opacity.coerceIn(0f, 1f) * 100).toInt()
+            opacitySeekBar.progress = opPct
+            opacityText.text = "Opacity: ${opPct}%"
 
             deleteButton.isEnabled = true
             deleteButton.alpha = 1.0f
@@ -1926,6 +2131,24 @@ class MainActivity : Activity(), SensorEventListener {
                     bindKeyButton.isEnabled = false
                     bindKeyButton.alpha = 0.4f
                     bindKeyButton.text = "MMB"
+                    shapeButton.isEnabled = false
+                    shapeButton.alpha = 0.4f
+                    modeButton.isEnabled = false
+                    modeButton.alpha = 0.4f
+                    turboCpsButton.visibility = View.GONE
+                    macroButton.isEnabled = false
+                    macroButton.alpha = 0.4f
+                }
+                ElementType.STEERING_WHEEL -> {
+                    val status = if (el.isEnabled) "" else " [DISABLED]"
+                    inspectorTitle.text = "Selected: Interactive Steering Wheel$status (Rotate to Steer Left/Right)"
+                    buttonControlsRow.visibility = View.VISIBLE
+                    dpadControlsRow.visibility = View.GONE
+                    keySettingsButton.isEnabled = false
+                    keySettingsButton.alpha = 0.4f
+                    bindKeyButton.isEnabled = false
+                    bindKeyButton.alpha = 0.4f
+                    bindKeyButton.text = "A / D"
                     shapeButton.isEnabled = false
                     shapeButton.alpha = 0.4f
                     modeButton.isEnabled = false
@@ -1989,27 +2212,49 @@ class MainActivity : Activity(), SensorEventListener {
                     macroButton.text = if (el.macroType.isEmpty() && el.customMacro.isEmpty()) "Macro: OFF" else "Macro: ⚡"
                 }
                 ElementType.STICK -> {
-                    val modeStr = if (controllerView.stickSprintMode) "⚡ Sprint Mode" else "🚶 Walk Mode"
-                    val floatStr = if (controllerView.stickFloatingMode) " • 📍 Floating" else ""
-                    val touchStr = if (controllerView.stickTouchScale > 1.0f) " • Touch Radius: ${String.format("%.1f", controllerView.stickTouchScale)}x" else ""
-                    val status = if (el.isEnabled) "" else " [DISABLED]"
-                    inspectorTitle.text = "Selected: Movement Stick ($modeStr$floatStr$touchStr)$status — Tap ⚙ to change"
-                    buttonControlsRow.visibility = View.VISIBLE
-                    dpadControlsRow.visibility = View.GONE
-                    keySettingsButton.isEnabled = true
-                    keySettingsButton.alpha = 1.0f
-                    keySettingsButton.text = "⚙️ Stick Mode"
-                    bindKeyButton.isEnabled = false
-                    bindKeyButton.alpha = 0.4f
-                    bindKeyButton.text = "WASD (Move)"
-                    shapeButton.isEnabled = false
-                    shapeButton.alpha = 0.4f
-                    modeButton.isEnabled = false
-                    modeButton.alpha = 0.4f
-                    turboCpsButton.visibility = View.GONE
-                    macroButton.isEnabled = false
-                    macroButton.alpha = 0.4f
-                    macroButton.text = "Macro: OFF"
+                    if (el.id == "heli_stick") {
+                        val status = if (el.isEnabled) "" else " [DISABLED]"
+                        inspectorTitle.text = "Selected: 🚁 Helicopter Flight Stick$status (Assign 8/5/4/6 pitch/roll keys)"
+                        buttonControlsRow.visibility = View.GONE
+                        dpadControlsRow.visibility = View.VISIBLE
+
+                        dpadUpBtn.text = "↑ Pitch Down [${formatKeyDisplay(el.dpadUpKey.ifEmpty { "num8" })}]"
+                        dpadDownBtn.text = "↓ Pitch Up [${formatKeyDisplay(el.dpadDownKey.ifEmpty { "num5" })}]"
+                        dpadLeftBtn.text = "← Bank Left [${formatKeyDisplay(el.dpadLeftKey.ifEmpty { "num4" })}]"
+                        dpadRightBtn.text = "→ Bank Right [${formatKeyDisplay(el.dpadRightKey.ifEmpty { "num6" })}]"
+
+                        if (el.isEnabled) {
+                            dpadEnableBtn.text = "🚫 Disable"
+                            dpadEnableBtn.setTextColor(Color.parseColor("#FFA726"))
+                            dpadEnableBtn.background = createCardDrawable(Color.parseColor("#3E2723"), 12f)
+                        } else {
+                            dpadEnableBtn.text = "✅ Enable"
+                            dpadEnableBtn.setTextColor(Color.parseColor("#2ECC71"))
+                            dpadEnableBtn.background = createCardDrawable(Color.parseColor("#1E3A2F"), 12f)
+                        }
+                    } else {
+                        val modeStr = if (controllerView.stickSprintMode) "⚡ Sprint Mode" else "🚶 Walk Mode"
+                        val floatStr = if (controllerView.stickFloatingMode) " • 📍 Floating" else ""
+                        val touchStr = if (controllerView.stickTouchScale > 1.0f) " • Touch Radius: ${String.format("%.1f", controllerView.stickTouchScale)}x" else ""
+                        val status = if (el.isEnabled) "" else " [DISABLED]"
+                        inspectorTitle.text = "Selected: Movement Stick ($modeStr$floatStr$touchStr)$status — Tap ⚙ to change"
+                        buttonControlsRow.visibility = View.VISIBLE
+                        dpadControlsRow.visibility = View.GONE
+                        keySettingsButton.isEnabled = true
+                        keySettingsButton.alpha = 1.0f
+                        keySettingsButton.text = "⚙️ Stick Mode"
+                        bindKeyButton.isEnabled = false
+                        bindKeyButton.alpha = 0.4f
+                        bindKeyButton.text = "WASD (Move)"
+                        shapeButton.isEnabled = false
+                        shapeButton.alpha = 0.4f
+                        modeButton.isEnabled = false
+                        modeButton.alpha = 0.4f
+                        turboCpsButton.visibility = View.GONE
+                        macroButton.isEnabled = false
+                        macroButton.alpha = 0.4f
+                        macroButton.text = "Macro: OFF"
+                    }
                 }
             }
         }
@@ -2915,7 +3160,232 @@ class MainActivity : Activity(), SensorEventListener {
             .show()
     }
 
+    private fun showHeliStickSettingsDialog(targetEl: HudElement) {
+        controllerView.selectElement(targetEl)
+        val dialog = AlertDialog.Builder(this).create()
+        val dialogView = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(28, 20, 28, 20)
+            background = createCardDrawable(Color.parseColor("#161B22"), 20f, Color.parseColor("#30363D"), 2)
+        }
+
+        // Header
+        val headerRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, 0, 0, 10)
+        }
+        val titleText = TextView(this).apply {
+            text = "🚁 Helicopter Flight Stick Settings"
+            textSize = 17f
+            setTextColor(Color.WHITE)
+            setTypeface(null, android.graphics.Typeface.BOLD)
+        }
+        headerRow.addView(titleText, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        val closeBtn = Button(this).apply {
+            text = "✕"
+            textSize = 16f
+            setTextColor(Color.parseColor("#8B949E"))
+            background = null
+            setPadding(8, 0, 8, 0)
+            setOnClickListener { dialog.dismiss() }
+        }
+        headerRow.addView(closeBtn)
+        dialogView.addView(headerRow)
+
+        // Status switch
+        val statusRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, 0, 0, 10)
+        }
+        val statusLabel = TextView(this).apply {
+            text = "Flight Stick Status:"
+            textSize = 13f
+            setTextColor(Color.parseColor("#E6EDF3"))
+        }
+        val statusSwitch = Switch(this).apply {
+            isChecked = targetEl.isEnabled
+            text = if (isChecked) "Enabled (Visible)  " else "Disabled (Hidden)  "
+            setTextColor(if (isChecked) Color.parseColor("#2ECC71") else Color.parseColor("#FF6B6B"))
+            setOnCheckedChangeListener { _, isCheckedNow ->
+                targetEl.isEnabled = isCheckedNow
+                text = if (isCheckedNow) "Enabled (Visible)  " else "Disabled (Hidden)  "
+                setTextColor(if (isCheckedNow) Color.parseColor("#2ECC71") else Color.parseColor("#FF6B6B"))
+                controllerView.invalidate()
+                controllerView.onLayoutChanged?.invoke()
+                updateInspector(targetEl)
+            }
+        }
+        statusRow.addView(statusLabel, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        statusRow.addView(statusSwitch)
+        dialogView.addView(statusRow)
+
+        // Directional Keys Card
+        val keysCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = createCardDrawable(Color.parseColor("#0D1117"), 12f, Color.parseColor("#30363D"), 1)
+            setPadding(16, 12, 16, 12)
+        }
+        val keysTitle = TextView(this).apply {
+            text = "🎮 FLIGHT DIRECTION KEYS (PITCH & ROLL):"
+            textSize = 11f
+            setTextColor(Color.parseColor("#58A6FF"))
+            setTypeface(null, android.graphics.Typeface.BOLD)
+            setPadding(0, 0, 0, 8)
+        }
+        keysCard.addView(keysTitle)
+
+        val keysGrid = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+        }
+
+        fun createDirBtn(dir: String, title: String, currentKey: String): Button {
+            return Button(this).apply {
+                text = "$title\n[${formatKeyDisplay(currentKey)}]"
+                textSize = 11f
+                setTextColor(Color.WHITE)
+                background = createCardDrawable(Color.parseColor("#1F6FEB"), 10f)
+                setPadding(10, 8, 10, 8)
+                setOnClickListener {
+                    showDpadKeyPickerDialog(dir)
+                    postDelayed({
+                        val updatedKey = when (dir) {
+                            "up" -> targetEl.dpadUpKey.ifEmpty { "num8" }
+                            "down" -> targetEl.dpadDownKey.ifEmpty { "num5" }
+                            "left" -> targetEl.dpadLeftKey.ifEmpty { "num4" }
+                            else -> targetEl.dpadRightKey.ifEmpty { "num6" }
+                        }
+                        text = "$title\n[${formatKeyDisplay(updatedKey)}]"
+                    }, 400L)
+                }
+            }
+        }
+
+        val upBtn = createDirBtn("up", "▲ Pitch Down", targetEl.dpadUpKey.ifEmpty { "num8" })
+        val downBtn = createDirBtn("down", "▼ Pitch Up", targetEl.dpadDownKey.ifEmpty { "num5" })
+        val leftBtn = createDirBtn("left", "◀ Bank Left", targetEl.dpadLeftKey.ifEmpty { "num4" })
+        val rightBtn = createDirBtn("right", "▶ Bank Right", targetEl.dpadRightKey.ifEmpty { "num6" })
+
+        keysGrid.addView(upBtn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = 6 })
+        keysGrid.addView(downBtn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = 6 })
+        keysGrid.addView(leftBtn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = 6 })
+        keysGrid.addView(rightBtn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        keysCard.addView(keysGrid)
+        dialogView.addView(keysCard)
+
+        // Opacity Section
+        val opacityLabel = TextView(this).apply {
+            val pct = (targetEl.opacity * 100).toInt()
+            text = "👁️ FLIGHT STICK OPACITY: $pct%" + if (pct == 0) " (Invisible / Ghost)" else ""
+            textSize = 12f
+            setTextColor(Color.WHITE)
+            setTypeface(null, android.graphics.Typeface.BOLD)
+            setPadding(0, 14, 0, 4)
+        }
+        dialogView.addView(opacityLabel)
+
+        val heliOpacitySeekBar = SeekBar(this).apply {
+            max = 100
+            progress = (targetEl.opacity * 100).toInt().coerceIn(0, 100)
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar?, prog: Int, fromUser: Boolean) {
+                    val op = prog / 100f
+                    opacityLabel.text = "👁️ FLIGHT STICK OPACITY: $prog%" + if (prog == 0) " (Invisible / Ghost)" else ""
+                    if (fromUser) {
+                        controllerView.updateSelectedOpacity(op)
+                        updateInspector(targetEl)
+                    }
+                }
+                override fun onStartTrackingTouch(sb: SeekBar?) {}
+                override fun onStopTrackingTouch(sb: SeekBar?) {}
+            })
+        }
+        dialogView.addView(heliOpacitySeekBar, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+
+        // Preset Chips
+        val chipScroll = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            setPadding(0, 4, 0, 8)
+        }
+        val chipRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val presets = listOf(0.0f to "0% (Ghost)", 0.25f to "25%", 0.50f to "50%", 0.75f to "75%", 1.0f to "100% (Solid)")
+        for ((opVal, opText) in presets) {
+            val chip = Button(this).apply {
+                text = opText
+                textSize = 9f
+                setTextColor(Color.parseColor("#C9D1D9"))
+                background = createCardDrawable(Color.parseColor("#21262D"), 8f)
+                setPadding(10, 3, 10, 3)
+                setOnClickListener {
+                    heliOpacitySeekBar.progress = (opVal * 100).toInt()
+                    val p = (opVal * 100).toInt()
+                    opacityLabel.text = "👁️ FLIGHT STICK OPACITY: $p%" + if (p == 0) " (Invisible / Ghost)" else ""
+                    controllerView.updateSelectedOpacity(opVal)
+                    updateInspector(targetEl)
+                }
+            }
+            chipRow.addView(chip, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { rightMargin = 6 })
+        }
+        chipScroll.addView(chipRow)
+        dialogView.addView(chipScroll)
+
+        // Actions: Delete & Done
+        val actionRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, 14, 0, 0)
+        }
+        val delBtn = Button(this).apply {
+            text = "🗑️ Delete Heli Stick"
+            textSize = 12f
+            setTextColor(Color.parseColor("#FF6B6B"))
+            background = createCardDrawable(Color.parseColor("#491818"), 12f)
+            setPadding(16, 10, 16, 10)
+            setOnClickListener {
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle("Delete Helicopter Flight Stick?")
+                    .setMessage("This will remove the Helicopter Flight Stick. You can restore it anytime from '+ Add / Restore Control'.")
+                    .setPositiveButton("Delete") { _, _ ->
+                        controllerView.elements.remove(targetEl)
+                        controllerView.selectElement(null)
+                        updateInspector(null)
+                        controllerView.invalidate()
+                        controllerView.onLayoutChanged?.invoke()
+                        dialog.dismiss()
+                        Toast.makeText(this@MainActivity, "Helicopter Flight Stick deleted", Toast.LENGTH_SHORT).show()
+                    }
+                    .setNegativeButton("Cancel", null)
+                    .show()
+            }
+        }
+        val doneBtn = Button(this).apply {
+            text = "✅ Done"
+            textSize = 13f
+            setTextColor(Color.WHITE)
+            background = createCardDrawable(Color.parseColor("#238636"), 12f)
+            setPadding(24, 10, 24, 10)
+            setOnClickListener {
+                HudConfig.saveLayout(this@MainActivity, controllerView.elements)
+                dialog.dismiss()
+            }
+        }
+        actionRow.addView(delBtn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = 10 })
+        actionRow.addView(doneBtn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.2f))
+        dialogView.addView(actionRow)
+
+        dialog.setView(dialogView)
+        dialog.show()
+        dialog.window?.let { w ->
+            val dm = resources.displayMetrics
+            w.setLayout((dm.widthPixels * 0.85f).toInt(), LinearLayout.LayoutParams.WRAP_CONTENT)
+        }
+    }
+
     private fun showStickSettingsDialog(targetEl: HudElement) {
+        if (targetEl.id == "heli_stick") {
+            showHeliStickSettingsDialog(targetEl)
+            return
+        }
         controllerView.selectElement(targetEl)
 
         var selectedSprint = controllerView.stickSprintMode
@@ -3228,6 +3698,61 @@ class MainActivity : Activity(), SensorEventListener {
         stickChipScroll.addView(stickChipRow)
         dialogView.addView(stickChipScroll)
 
+        // Section: Movement Stick Opacity (Transparency)
+        val stickOpacityLabel = TextView(this).apply {
+            val pct = (targetEl.opacity * 100).toInt()
+            text = "👁️ STICK OPACITY: $pct%" + if (pct == 0) " (Invisible / Ghost)" else ""
+            textSize = 12f
+            setTextColor(Color.WHITE)
+            setTypeface(null, android.graphics.Typeface.BOLD)
+            setPadding(0, 14, 0, 4)
+        }
+        dialogView.addView(stickOpacityLabel)
+
+        val stickOpacitySeekBar = SeekBar(this).apply {
+            max = 100
+            progress = (targetEl.opacity * 100).toInt().coerceIn(0, 100)
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar?, prog: Int, fromUser: Boolean) {
+                    val op = prog / 100f
+                    stickOpacityLabel.text = "👁️ STICK OPACITY: $prog%" + if (prog == 0) " (Invisible / Ghost)" else ""
+                    if (fromUser) {
+                        controllerView.updateSelectedOpacity(op)
+                        updateInspector(targetEl)
+                    }
+                }
+                override fun onStartTrackingTouch(sb: SeekBar?) {}
+                override fun onStopTrackingTouch(sb: SeekBar?) {}
+            })
+        }
+        dialogView.addView(stickOpacitySeekBar, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+
+        val stickOpChipScroll = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            setPadding(0, 4, 0, 8)
+        }
+        val stickOpChipRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val stickOpPresets = listOf(0.0f to "0% (Ghost)", 0.25f to "25%", 0.50f to "50%", 0.75f to "75%", 1.0f to "100% (Solid)")
+        for ((opVal, opText) in stickOpPresets) {
+            val chip = Button(this).apply {
+                text = opText
+                textSize = 9f
+                setTextColor(Color.parseColor("#C9D1D9"))
+                background = createCardDrawable(Color.parseColor("#21262D"), 8f)
+                setPadding(10, 3, 10, 3)
+                setOnClickListener {
+                    stickOpacitySeekBar.progress = (opVal * 100).toInt()
+                    val p = (opVal * 100).toInt()
+                    stickOpacityLabel.text = "👁️ STICK OPACITY: $p%" + if (p == 0) " (Invisible / Ghost)" else ""
+                    controllerView.updateSelectedOpacity(opVal)
+                    updateInspector(targetEl)
+                }
+            }
+            stickOpChipRow.addView(chip, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { rightMargin = 6 })
+        }
+        stickOpChipScroll.addView(stickOpChipRow)
+        dialogView.addView(stickOpChipScroll)
+
         // Apply button
         val applyBtn = Button(this).apply {
             text = "✅ Apply & Save"
@@ -3482,11 +4007,13 @@ class MainActivity : Activity(), SensorEventListener {
         val statsTouchPaddingText = TextView(this).apply { textSize = 11f; setTextColor(Color.parseColor("#C9D1D9")); setPadding(0, 2, 0, 2) }
         val statsGhostText = TextView(this).apply { textSize = 11f; setTextColor(Color.parseColor("#C9D1D9")); setPadding(0, 2, 0, 2) }
         val statsDragDistanceText = TextView(this).apply { textSize = 11f; setTextColor(Color.parseColor("#C9D1D9")); setPadding(0, 2, 0, 2) }
+        val statsOpacityText = TextView(this).apply { textSize = 11f; setTextColor(Color.parseColor("#C9D1D9")); setPadding(0, 2, 0, 2) }
 
         statsCard.addView(statsModeText)
         statsCard.addView(statsShapeText)
         statsCard.addView(statsRotationText)
         statsCard.addView(statsScaleText)
+        statsCard.addView(statsOpacityText)
         statsCard.addView(statsMacroText)
         statsCard.addView(statsSwipeAimText)
         statsCard.addView(statsGhostText)
@@ -3546,6 +4073,8 @@ class MainActivity : Activity(), SensorEventListener {
             }
             statsRotationText.text = "• Rotation: ${selected.rotation.toInt()}°"
             statsScaleText.text = "• Scale: ${String.format("%.2f", selected.scale)}x"
+            val opPct = (selected.opacity * 100).toInt()
+            statsOpacityText.text = "• Opacity: $opPct%" + if (opPct == 0) " (Invisible / Ghost Touch)" else ""
             statsMacroText.text = "• Macro: " + if (selected.macroType.isNotEmpty() || selected.customMacro.isNotEmpty()) "Active ⚡" else "Disabled"
             statsSwipeAimText.text = "• Swipe Aim: " + if (selected.swipeToAim) "Active 🎯" else "Disabled"
             statsGhostText.text = "• Ghost Shadow: " + if (selected.showGhostShadow) "Enabled 👻" else "Disabled"
@@ -4165,7 +4694,87 @@ class MainActivity : Activity(), SensorEventListener {
         touchChipScroll.addView(touchChipRow)
         rightCol.addView(touchChipScroll)
 
-        // --- SECTION F: Macro Studio & Delete Buttons ---
+        // --- SECTION F: Individual Button Opacity ---
+        val opacityHeader = TextView(this).apply {
+            text = "BUTTON OPACITY (TRANSPARENCY):"
+            textSize = 11f
+            setTextColor(Color.parseColor("#58A6FF"))
+            setTypeface(null, android.graphics.Typeface.BOLD)
+            setPadding(0, 10, 0, 4)
+        }
+        rightCol.addView(opacityHeader)
+
+        val opacityDesc = TextView(this).apply {
+            text = "Adjust transparency down to 0% to make the button completely invisible during gameplay while still touchable."
+            textSize = 10f
+            setTextColor(Color.parseColor("#8B949E"))
+            setPadding(0, 0, 0, 4)
+        }
+        rightCol.addView(opacityDesc)
+
+        val opacityValLabel = TextView(this).apply {
+            val pct = (selected.opacity * 100).toInt()
+            text = "👁️ OPACITY: $pct%" + if (pct == 0) " (Completely Transparent / Ghost Touch)" else ""
+            textSize = 11f
+            setTextColor(Color.WHITE)
+            setPadding(0, 2, 0, 4)
+        }
+        rightCol.addView(opacityValLabel)
+
+        val keyOpacitySeekBar = SeekBar(this).apply {
+            max = 100
+            progress = (selected.opacity * 100).toInt().coerceIn(0, 100)
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar?, prog: Int, fromUser: Boolean) {
+                    val op = prog / 100f
+                    opacityValLabel.text = "👁️ OPACITY: $prog%" + if (prog == 0) " (Completely Transparent / Ghost Touch)" else ""
+                    if (fromUser) {
+                        controllerView.updateSelectedOpacity(op)
+                        updateStatsCard()
+                        updateInspector(selected)
+                    }
+                }
+                override fun onStartTrackingTouch(sb: SeekBar?) {}
+                override fun onStopTrackingTouch(sb: SeekBar?) {}
+            })
+        }
+        rightCol.addView(keyOpacitySeekBar, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+
+        // Quick Preset Chips for Opacity: 0% (Ghost), 25%, 50%, 75%, 100% (Solid)
+        val opacityChipScroll = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            setPadding(0, 4, 0, 8)
+        }
+        val opacityChipRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val opacityPresets = listOf(
+            0.0f to "0% (Ghost)",
+            0.25f to "25%",
+            0.50f to "50%",
+            0.75f to "75%",
+            1.0f to "100% (Solid)"
+        )
+        for ((opVal, opText) in opacityPresets) {
+            val chip = Button(this).apply {
+                text = opText
+                textSize = 9f
+                setTextColor(Color.parseColor("#C9D1D9"))
+                background = createCardDrawable(Color.parseColor("#21262D"), 8f)
+                setPadding(10, 3, 10, 3)
+                setOnClickListener {
+                    keyOpacitySeekBar.progress = (opVal * 100).toInt()
+                    val p = (opVal * 100).toInt()
+                    opacityValLabel.text = "👁️ OPACITY: $p%" + if (p == 0) " (Completely Transparent / Ghost Touch)" else ""
+                    controllerView.updateSelectedOpacity(opVal)
+                    updateStatsCard()
+                    updateInspector(selected)
+                }
+            }
+            opacityChipRow.addView(chip, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { rightMargin = 6 })
+        }
+        opacityChipScroll.addView(opacityChipRow)
+        rightCol.addView(opacityChipScroll)
+
+        // --- SECTION G: Macro Studio & Delete Buttons ---
         val actionRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             setPadding(0, 10, 0, 0)
@@ -4253,22 +4862,36 @@ class MainActivity : Activity(), SensorEventListener {
 
     private fun showDpadKeyPickerDialog(direction: String) {
         val selected = controllerView.selectedElement ?: return
-        if (selected.type != ElementType.DPAD) return
+        if (selected.type != ElementType.DPAD && selected.id != "heli_stick") return
 
         val names = VALID_KEY_LIST.map { "${it.displayName} [${it.code}]" }.toTypedArray()
-        val dirTitle = when (direction) {
-            "up" -> "D-Pad UP"
-            "down" -> "D-Pad DOWN"
-            "left" -> "D-Pad LEFT"
-            "right" -> "D-Pad RIGHT"
-            else -> direction.uppercase()
+        val dirTitle = if (selected.id == "heli_stick") {
+            when (direction) {
+                "up" -> "Helicopter Pitch Down (Forward)"
+                "down" -> "Helicopter Pitch Up (Backward)"
+                "left" -> "Helicopter Bank Left"
+                "right" -> "Helicopter Bank Right"
+                else -> direction.uppercase()
+            }
+        } else {
+            when (direction) {
+                "up" -> "D-Pad UP"
+                "down" -> "D-Pad DOWN"
+                "left" -> "D-Pad LEFT"
+                "right" -> "D-Pad RIGHT"
+                else -> direction.uppercase()
+            }
         }
 
         AlertDialog.Builder(this)
             .setTitle("Assign Key for $dirTitle")
             .setItems(names) { _, which ->
                 val chosen = VALID_KEY_LIST[which]
-                controllerView.updateDpadDirectionKey(direction, chosen.code)
+                if (selected.id == "heli_stick") {
+                    controllerView.updateHeliStickDirectionKey(direction, chosen.code)
+                } else {
+                    controllerView.updateDpadDirectionKey(direction, chosen.code)
+                }
                 updateInspector(selected)
                 Toast.makeText(this, "$dirTitle set to ${chosen.displayName}", Toast.LENGTH_SHORT).show()
             }
@@ -4286,9 +4909,10 @@ class MainActivity : Activity(), SensorEventListener {
         options.add("➕ Add Custom Button (C1..C16)")
         for (m in missingBaseElements) {
             val name = when (m.type) {
-                ElementType.STICK -> "Movement Stick"
+                ElementType.STICK -> if (m.id == "heli_stick") "Helicopter Flight Stick" else "Movement Stick"
                 ElementType.DPAD -> "D-Pad"
                 ElementType.SCROLL_WHEEL -> "Mouse Scroll Wheel"
+                ElementType.STEERING_WHEEL -> "Steering Wheel"
                 else -> m.label.ifEmpty { m.id.uppercase() }
             }
             options.add("🔄 Restore $name")
@@ -4371,9 +4995,10 @@ class MainActivity : Activity(), SensorEventListener {
             }
 
             val name = when (el.type) {
-                ElementType.STICK -> "🕹️ Movement Stick"
+                ElementType.STICK -> if (el.id == "heli_stick") "🚁 Helicopter Flight Stick" else "🕹️ Movement Stick"
                 ElementType.DPAD -> "🎮 D-Pad"
                 ElementType.SCROLL_WHEEL -> "🖱️ Mouse Scroll Wheel"
+                ElementType.STEERING_WHEEL -> "🛞 Steering Wheel"
                 else -> {
                     val keyDisplay = if (el.key.isNotEmpty()) " [${formatKeyDisplay(el.key)}]" else ""
                     "🔘 ${el.label.ifEmpty { el.id.uppercase() }}$keyDisplay"
@@ -4472,6 +5097,7 @@ class MainActivity : Activity(), SensorEventListener {
         controllerView.isEditMode = false
         editOverlay.visibility = View.GONE
         gearButton.visibility = View.VISIBLE
+        updatePadGearButtonState()
     }
 
     override fun onBackPressed() {
@@ -4905,6 +5531,12 @@ class MainActivity : Activity(), SensorEventListener {
 
     override fun onDestroy() {
         super.onDestroy()
+        try {
+            if (wakeLock?.isHeld == true) wakeLock?.release()
+            wakeLock = null
+            if (wifiLock?.isHeld == true) wifiLock?.release()
+            wifiLock = null
+        } catch (_: Exception) {}
         if (isMirroringEnabled) {
             videoMirrorClient.stop()
             audioMirrorClient.stop()

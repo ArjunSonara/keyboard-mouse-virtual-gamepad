@@ -154,6 +154,7 @@ class NetworkClient {
                         try {
                             val s = Socket()
                             s.tcpNoDelay = true
+                            s.keepAlive = true
                             s.sendBufferSize = 1024
                             s.connect(java.net.InetSocketAddress("127.0.0.1", port), 1200)
                             val out = s.getOutputStream()

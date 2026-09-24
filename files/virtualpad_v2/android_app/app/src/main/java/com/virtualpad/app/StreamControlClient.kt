@@ -38,6 +38,7 @@ class StreamControlClient {
             val s = Socket().apply {
                 connect(InetSocketAddress(hostIp, CONTROL_PORT), 3000)
                 tcpNoDelay = true
+                keepAlive = true
             }
             socket = s
             outputStream = s.getOutputStream()

@@ -147,7 +147,18 @@ def move_mouse_relative(dx: int, dy: int):
 _held_ctx = {}
 _key_sources = {}
 
+KEY_ALIASES = {
+    "numpad0": "num0", "numpad1": "num1", "numpad2": "num2",
+    "numpad3": "num3", "numpad4": "num4", "numpad5": "num5",
+    "numpad6": "num6", "numpad7": "num7", "numpad8": "num8",
+    "numpad9": "num9", "num_0": "num0", "num_1": "num1",
+    "num_2": "num2", "num_3": "num3", "num_4": "num4",
+    "num_5": "num5", "num_6": "num6", "num_7": "num7",
+    "num_8": "num8", "num_9": "num9",
+}
+
 def _actually_set_key(key: str, should_hold: bool):
+    key = KEY_ALIASES.get(key.lower(), key.lower())
     is_held = key in _held_ctx
     mouse_btn = MOUSE_BUTTON_MAP.get(key.lower())
 
@@ -398,6 +409,11 @@ def tcp_listener():
             conn, _ = sock.accept()
             try:
                 conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                conn.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+                try:
+                    conn.ioctl(socket.SIO_KEEPALIVE_VALS, (1, 5000, 1000))
+                except Exception:
+                    pass
                 connection_status = "Connected (USB Cable)"
                 print("[USB/TCP] phone connected over USB", flush=True)
                 buf = bytearray()
@@ -408,11 +424,18 @@ def tcp_listener():
                     buf.extend(chunk)
                     while len(buf) >= 2:
                         packet_len = struct.unpack("<H", buf[:2])[0]
+                        if packet_len > 4096 or packet_len == 0:
+                            # Framing desynchronization guard: discard first byte and search for valid magic
+                            del buf[0]
+                            continue
                         if len(buf) < 2 + packet_len:
                             break
                         payload = bytes(buf[2 : 2 + packet_len])
                         del buf[: 2 + packet_len]
-                        dispatch_packet(payload)
+                        try:
+                            dispatch_packet(payload)
+                        except Exception as ex:
+                            print(f"[Input Error] {ex}", flush=True)
             finally:
                 try:
                     conn.close()
@@ -623,8 +646,10 @@ def toggle_pcmirror_daemon():
         start_pcmirror_daemon()
         return True
 
+_adb_fail_count = 0
+
 def auto_adb_reverse():
-    global usb_status_str, _last_reversed_devices
+    global usb_status_str, _last_reversed_devices, _adb_fail_count
     adb_bin = get_adb_bin()
 
     if not adb_bin:
@@ -632,47 +657,70 @@ def auto_adb_reverse():
         return
 
     try:
-        r = silent_run([adb_bin, "devices"], capture_output=True, text=True, timeout=6)
+        r = silent_run([adb_bin, "devices"], capture_output=True, text=True, timeout=8)
         lines = r.stdout.splitlines() if r.returncode == 0 else []
-        devs = set([line.split("\t")[0].strip() for line in lines if "\tdevice" in line])
+        all_devs = [line.split("\t")[0].strip() for line in lines if "\tdevice" in line]
+
+        # Prioritize physical USB devices over emulators (e.g. emulator-5554)
+        physical_devs = [d for d in all_devs if not d.startswith("emulator-")]
+        devs = physical_devs if physical_devs else all_devs
+
         unauthorized = any("\tunauthorized" in line for line in lines)
         offline = any("\toffline" in line for line in lines)
 
         if offline and not devs:
             silent_run([adb_bin, "reconnect", "offline"], capture_output=True, timeout=4)
             time.sleep(0.5)
-            r = silent_run([adb_bin, "devices"], capture_output=True, text=True, timeout=6)
+            r = silent_run([adb_bin, "devices"], capture_output=True, text=True, timeout=8)
             lines = r.stdout.splitlines() if r.returncode == 0 else []
-            devs = set([line.split("\t")[0].strip() for line in lines if "\tdevice" in line])
+            all_devs = [line.split("\t")[0].strip() for line in lines if "\tdevice" in line]
+            physical_devs = [d for d in all_devs if not d.startswith("emulator-")]
+            devs = physical_devs if physical_devs else all_devs
 
         if unauthorized and not devs:
             usb_status_str = "⚠️ Phone unauthorized: Tap 'Allow USB debugging' on phone"
             _last_reversed_devices.clear()
+            _adb_fail_count = 0
             return
 
         if devs:
-            rev_list = silent_run([adb_bin, "reverse", "--list"], capture_output=True, text=True, timeout=5)
+            _adb_fail_count = 0
+            target_dev = devs[0]  # Target primary physical device
+
+            # Query existing reverse list specifically for this device
+            rev_list = silent_run([adb_bin, "-s", target_dev, "reverse", "--list"], capture_output=True, text=True, timeout=5)
             rev_output = rev_list.stdout if rev_list.returncode == 0 else ""
-            needs_reverse = any(f"tcp:{p}" not in rev_output for p in REVERSE_PORTS)
 
-            if needs_reverse or devs != _last_reversed_devices:
-                all_ok = True
-                for p in REVERSE_PORTS:
-                    rev = silent_run([adb_bin, "reverse", f"tcp:{p}", f"tcp:{p}"], capture_output=True, text=True, timeout=5)
-                    if rev.returncode != 0:
-                        all_ok = False
+            # Identify which ports (if any) are actually missing
+            missing_ports = [p for p in REVERSE_PORTS if f"tcp:{p}" not in rev_output]
 
-                if all_ok:
-                    _last_reversed_devices = set(devs)
-                    usb_status_str = f"🟢 USB Ready: All 4 ports routed ({len(devs)} device connected)"
-                else:
-                    usb_status_str = "⚠️ ADB reverse partial/failed on some ports"
+            # If all ports are already routed and device hasn't changed, DO NOT re-run adb reverse!
+            # (Re-running adb reverse resets active TCP tunnels and severs live connections!)
+            if not missing_ports and set(devs) == _last_reversed_devices:
+                usb_status_str = f"🟢 USB Ready: All 4 ports routed ({target_dev})"
+                return
+
+            # Route ONLY missing ports or ports for a newly attached device
+            all_ok = True
+            ports_to_route = missing_ports if (set(devs) == _last_reversed_devices and missing_ports) else REVERSE_PORTS
+
+            for p in ports_to_route:
+                rev = silent_run([adb_bin, "-s", target_dev, "reverse", f"tcp:{p}", f"tcp:{p}"], capture_output=True, text=True, timeout=5)
+                if rev.returncode != 0:
+                    all_ok = False
+
+            if all_ok or not missing_ports:
+                _last_reversed_devices = set(devs)
+                usb_status_str = f"🟢 USB Ready: All 4 ports routed ({target_dev})"
             else:
-                usb_status_str = f"🟢 USB Ready: All 4 ports routed ({len(devs)} device connected)"
+                usb_status_str = "⚠️ ADB reverse partial/failed on some ports"
             return
 
-        _last_reversed_devices.clear()
-        usb_status_str = "⚪ USB: Plug in phone with USB Debugging enabled"
+        # Debounce disconnects: require 3 consecutive failed queries before clearing
+        _adb_fail_count += 1
+        if _adb_fail_count >= 3:
+            _last_reversed_devices.clear()
+            usb_status_str = "⚪ USB: Plug in phone with USB Debugging enabled"
     except Exception as e:
         usb_status_str = f"USB Note: {e}"
 

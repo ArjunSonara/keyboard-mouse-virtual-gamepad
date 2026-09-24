@@ -144,6 +144,7 @@ class VideoMirrorClient(private val surfaceView: SurfaceView) {
                     Log.i(TAG, "Connecting to video stream on $host:$VIDEO_PORT...")
                     val s = Socket().apply {
                         tcpNoDelay = true
+                        keepAlive = true
                         receiveBufferSize = 2 * 1024 * 1024
                         connect(InetSocketAddress(host, VIDEO_PORT), 3000)
                     }
@@ -294,13 +295,6 @@ class VideoMirrorClient(private val surfaceView: SurfaceView) {
                         }
                         dataIn.readFully(packetBuf, 0, len)
                         bytesCounter.addAndGet((len + 4).toLong())
-
-                        // Check if codec was dynamically switched mid-stream
-                        val checkParams = parseCodecParams(packetBuf, len)
-                        if (checkParams != null && checkParams.mime != currentMime) {
-                            Log.i(TAG, "Codec switch detected (${currentMime} -> ${checkParams.mime}), restarting decoder...")
-                            break // Cleanly restarts loop with new codec
-                        }
 
                         // Poll input buffer with 8ms timeout (~1 frame at 120Hz)
                         val index = availableInputBuffers.poll(8, TimeUnit.MILLISECONDS)

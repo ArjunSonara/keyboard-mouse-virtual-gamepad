@@ -5,6 +5,11 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.DashPathEffect
 import android.graphics.Paint
+import android.graphics.Path
+import android.graphics.LinearGradient
+import android.graphics.RadialGradient
+import android.graphics.Shader
+import android.graphics.PointF
 import android.graphics.RectF
 import android.graphics.Typeface
 import android.os.Handler
@@ -168,6 +173,22 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
         isAntiAlias = true
     }
 
+    // --- Steering Mode Paints ---
+    private val pedalGasFillPaint = Paint().apply { color = Color.parseColor("#143522"); isAntiAlias = true }
+    private val pedalGasActiveFillPaint = Paint().apply { color = Color.parseColor("#2EA043"); isAntiAlias = true }
+    private val pedalGasOutlinePaint = Paint().apply { color = Color.parseColor("#3FB950"); style = Paint.Style.STROKE; strokeWidth = 4f; isAntiAlias = true }
+
+    private val pedalBrakeFillPaint = Paint().apply { color = Color.parseColor("#381717"); isAntiAlias = true }
+    private val pedalBrakeActiveFillPaint = Paint().apply { color = Color.parseColor("#DA3633"); isAntiAlias = true }
+    private val pedalBrakeOutlinePaint = Paint().apply { color = Color.parseColor("#F85149"); style = Paint.Style.STROKE; strokeWidth = 4f; isAntiAlias = true }
+
+    private val handbrakeFillPaint = Paint().apply { color = Color.parseColor("#362512"); isAntiAlias = true }
+    private val handbrakeActiveFillPaint = Paint().apply { color = Color.parseColor("#D29922"); isAntiAlias = true }
+    private val handbrakeOutlinePaint = Paint().apply { color = Color.parseColor("#E3B341"); style = Paint.Style.STROKE; strokeWidth = 4f; isAntiAlias = true }
+
+    private val steerModeActiveFillPaint = Paint().apply { color = Color.parseColor("#193B2D"); isAntiAlias = true }
+    private val steerModeActiveOutlinePaint = Paint().apply { color = Color.parseColor("#FFD700"); style = Paint.Style.STROKE; strokeWidth = 4.5f; isAntiAlias = true }
+
     // --- State & Layout ---
     val elements = mutableListOf<HudElement>()
     private var layoutReady = false
@@ -195,6 +216,71 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
             field = value.coerceIn(0.0f, 1.0f)
             invalidate()
         }
+
+    var areButtonsVisible: Boolean = true
+        set(value) {
+            field = value
+            if (!value && !isEditMode) {
+                // Clear any held input when turning buttons off to avoid stuck keys on PC
+                pointerZone.clear()
+                buttonPointerLastX.clear()
+                buttonPointerLastY.clear()
+                buttonTouchStart.clear()
+                buttonTouchCurrent.clear()
+                latchedButtons.clear()
+                stopAllTurbo()
+                stopAllInstantTap()
+                isAutoRunLocked = false
+                isStickInLockNotch = false
+                autoShiftActive = false
+                dynamicStickOriginX = null
+                dynamicStickOriginY = null
+                lookPointerId = null
+                accumDx = 0f
+                accumDy = 0f
+                state = ControllerState()
+                emitState()
+            }
+            invalidate()
+        }
+
+    var currentSteeringMode: SteeringMode = SteeringMode.OFF
+        set(value) {
+            field = value
+            pointerZone.clear()
+            buttonPointerLastX.clear()
+            buttonPointerLastY.clear()
+            buttonTouchStart.clear()
+            buttonTouchCurrent.clear()
+            latchedButtons.clear()
+            stopAllTurbo()
+            stopAllInstantTap()
+            isAutoRunLocked = false
+            isStickInLockNotch = false
+            autoShiftActive = false
+            dynamicStickOriginX = null
+            dynamicStickOriginY = null
+            lookPointerId = null
+            wheelPointerId = null
+            visualWheelAngle = 0f
+            if (wheelSteeringLeft) {
+                wheelSteeringLeft = false
+                onMacroKeyRequested?.invoke("a", false)
+            }
+            if (wheelSteeringRight) {
+                wheelSteeringRight = false
+                onMacroKeyRequested?.invoke("d", false)
+            }
+            resetHeliStick()
+            accumDx = 0f
+            accumDy = 0f
+            state = ControllerState()
+            emitState()
+            invalidate()
+            onSteeringModeChanged?.invoke(value)
+        }
+
+    var onSteeringModeChanged: ((SteeringMode) -> Unit)? = null
 
     var isEditMode: Boolean = false
         set(value) {
@@ -360,6 +446,37 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
     var onMacroEventRecorded: ((key: String, isDown: Boolean, timestampMs: Long) -> Unit)? = null
     var onOpenKeySettingsRequested: ((HudElement) -> Unit)? = null
 
+    // Steering Mode & Wheel State
+    private var steerModePointerId: Int? = null
+    private var steerModeDownX = 0f
+    private var steerModeDownY = 0f
+    private var steerModeCurrentX = 0f
+    private var steerModeCurrentY = 0f
+    private var steerModeHoveredOption: SteeringMode? = null
+    var isRadialSelectorOpen: Boolean = false
+        private set
+    private val steerModeLongPressHandler = Handler(Looper.getMainLooper())
+    private var steerModeLongPressRunnable: Runnable? = null
+    private var lastActiveSteeringMode = SteeringMode.PEDALS
+
+    private var wheelPointerId: Int? = null
+    var visualWheelAngle: Float = 0f
+        private set
+    private var wheelPrevTouchX = 0f
+    private var wheelPrevTouchY = 0f
+    private var wheelSteeringLeft = false
+    private var wheelSteeringRight = false
+    private var wheelSpringAnimator: android.animation.ValueAnimator? = null
+
+    // Helicopter Flight Stick State
+    private var heliStickPointerId: Int? = null
+    private var visualHeliStickX = 0f
+    private var visualHeliStickY = 0f
+    private var heli8Active = false
+    private var heli5Active = false
+    private var heli4Active = false
+    private var heli6Active = false
+
     val hapticHelper = HapticHelper(context, this)
 
     init {
@@ -370,6 +487,7 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
         buttonTextOpacity = HudConfig.getButtonTextOpacity(context)
         stickTouchScale = HudConfig.getStickTouchScale(context)
         stickFloatingMode = HudConfig.isStickFloatingMode(context)
+        currentSteeringMode = HudConfig.getSteeringMode(context)
         elements.addAll(HudConfig.loadLayout(context))
     }
 
@@ -394,6 +512,8 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
             buttonFillOpacity = HudConfig.getButtonFillOpacity(context)
             buttonBorderOpacity = HudConfig.getButtonBorderOpacity(context)
             buttonTextOpacity = HudConfig.getButtonTextOpacity(context)
+            areButtonsVisible = HudConfig.areButtonsVisible(context)
+            currentSteeringMode = HudConfig.getSteeringMode(context)
             elements.addAll(HudConfig.loadLayout(context))
         }
         layoutReady = true
@@ -410,6 +530,10 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
             canvas.drawColor(Color.parseColor("#440A0E1A")) // Subtle translucent dark tint only in edit mode
         }
         if (!layoutReady) return
+        if (!isEditMode && !areButtonsVisible) {
+            // All buttons are turned OFF: clean 100% unobstructed screen view!
+            return
+        }
 
         val W = width.toFloat()
         val H = height.toFloat()
@@ -446,11 +570,34 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
         val sortedList = elements.sortedBy { it.zOrder }
         for (el in sortedList) {
             if (!isEditMode && !el.isEnabled) continue
+            if (!isElementVisibleInCurrentMode(el)) continue
+
+            val elOpacity = el.opacity.coerceIn(0.0f, 1.0f)
+            if (!isEditMode && elOpacity <= 0f) {
+                // Completely invisible button during gameplay: skip drawing to canvas (still touchable)
+                continue
+            }
+
+            val needsAlphaLayer = elOpacity < 1.0f
+            if (needsAlphaLayer) {
+                val alphaInt = if (isEditMode) {
+                    ((maxOf(0.35f, elOpacity)) * 255).toInt().coerceIn(0, 255)
+                } else {
+                    (elOpacity * 255).toInt().coerceIn(0, 255)
+                }
+                canvas.saveLayerAlpha(0f, 0f, W, H, alphaInt)
+            }
+
             when (el.type) {
                 ElementType.STICK -> drawStickElement(canvas, el, W, H)
                 ElementType.DPAD -> drawDpadElement(canvas, el, W, H)
                 ElementType.BUTTON -> drawButtonElement(canvas, el, W, H)
                 ElementType.SCROLL_WHEEL -> drawScrollWheelElement(canvas, el, W, H)
+                ElementType.STEERING_WHEEL -> drawSteeringWheelElement(canvas, el, W, H)
+            }
+
+            if (needsAlphaLayer) {
+                canvas.restore()
             }
         }
 
@@ -458,6 +605,346 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
         if (isEditMode && selectedElement != null) {
             drawSelectionHighlight(canvas, selectedElement!!, W, H)
         }
+
+        // Draw radial mode quick selector overlay if open
+        if (!isEditMode && isRadialSelectorOpen) {
+            drawRadialModeSelector(canvas, W, H)
+        }
+    }
+
+    fun isElementVisibleInCurrentMode(el: HudElement): Boolean {
+        // Mode button is ALWAYS visible in all modes
+        if (el.id == "steer_mode") return true
+
+        val mode1Elements = setOf("pedal_gas", "pedal_brake", "steer_left", "steer_right")
+        val mode2Elements = setOf("steering_wheel", "wheel_gas", "wheel_brake")
+        val heliElements = setOf("heli_stick", "heli_8", "heli_4", "heli_5", "heli_6")
+        val sharedSteeringElements = setOf("steer_handbrake")
+
+        return when (currentSteeringMode) {
+            SteeringMode.OFF -> {
+                // Steering Mode 0: OFF (Normal Joystick mode)
+                // Hide all steering-specific and helicopter controls
+                if (el.id in mode1Elements || el.id in mode2Elements || el.id in heliElements || el.id in sharedSteeringElements || el.type == ElementType.STEERING_WHEEL) {
+                    false
+                } else {
+                    true
+                }
+            }
+            SteeringMode.PEDALS -> {
+                // Steering Mode 1: PEDALS (Pedals on left, Arrows on right)
+                // Hide leftstick, Mode 2 wheel controls, and helicopter controls
+                if (el.id == "leftstick" || (el.type == ElementType.STICK && el.id != "rightstick" && el.id != "heli_stick") ||
+                    el.id in mode2Elements || el.id in heliElements || el.type == ElementType.STEERING_WHEEL) {
+                    false
+                } else {
+                    true
+                }
+            }
+            SteeringMode.WHEEL -> {
+                // Steering Mode 2: WHEEL (Steering Wheel on left, dedicated lever & brake on right)
+                // Hide leftstick, Mode 1 pedals & arrows, and helicopter controls
+                if (el.id == "leftstick" || (el.type == ElementType.STICK && el.id != "rightstick" && el.id != "heli_stick") ||
+                    el.id in mode1Elements || el.id in heliElements) {
+                    false
+                } else {
+                    true
+                }
+            }
+            SteeringMode.HELICOPTER -> {
+                // Steering Mode 3: HELICOPTER (Normal Joystick on left for WASD, Heli Joystick on right for pitch/roll)
+                // Hide Mode 1 pedals/arrows, Mode 2 wheel/pedals, shared steering handbrake, and old individual 8/4/5/6 buttons.
+                if (el.id in mode1Elements || el.id in mode2Elements || el.id in sharedSteeringElements || el.type == ElementType.STEERING_WHEEL ||
+                    el.id in setOf("heli_8", "heli_4", "heli_5", "heli_6")) {
+                    false
+                } else {
+                    true
+                }
+            }
+        }
+    }
+
+    private fun drawSteeringWheelElement(canvas: Canvas, el: HudElement, W: Float, H: Float) {
+        val cx = el.xPct * W
+        val cy = el.yPct * H
+        val r = H * 0.17f * el.scale
+
+        canvas.save()
+        canvas.rotate(visualWheelAngle, cx, cy)
+
+        // Outer rim
+        val rimPaint = Paint(outlinePaint).apply {
+            style = Paint.Style.STROKE
+            strokeWidth = r * 0.22f
+            color = Color.parseColor("#1C2433")
+        }
+        canvas.drawCircle(cx, cy, r, rimPaint)
+
+        // Outer rim border
+        val rimBorderPaint = Paint(outlinePaint).apply {
+            style = Paint.Style.STROKE
+            strokeWidth = 3f
+            color = if (wheelPointerId != null) Color.parseColor("#4FC3F7") else Color.parseColor("#3A8FB7")
+        }
+        canvas.drawCircle(cx, cy, r + r * 0.11f, rimBorderPaint)
+        canvas.drawCircle(cx, cy, r - r * 0.11f, rimBorderPaint)
+
+        // Top racing centering stripe (at 12 o'clock / -90 deg)
+        val stripePaint = Paint().apply {
+            color = Color.parseColor("#FFD700")
+            style = Paint.Style.STROKE
+            strokeWidth = r * 0.22f
+            isAntiAlias = true
+        }
+        val stripeRect = RectF(cx - r, cy - r, cx + r, cy + r)
+        canvas.drawArc(stripeRect, -100f, 20f, false, stripePaint)
+
+        // 3 Spokes connecting to center hub
+        val spokePaint = Paint().apply {
+            color = Color.parseColor("#252E3E")
+            style = Paint.Style.FILL
+            isAntiAlias = true
+        }
+        val spokeBorderPaint = Paint().apply {
+            color = Color.parseColor("#3A8FB7")
+            style = Paint.Style.STROKE
+            strokeWidth = 2.5f
+            isAntiAlias = true
+        }
+        val spokeW = r * 0.16f
+        val hubR = r * 0.36f
+
+        // Left spoke (-180 deg)
+        val leftRect = RectF(cx - r, cy - spokeW / 2f, cx - hubR * 0.7f, cy + spokeW / 2f)
+        canvas.drawRoundRect(leftRect, 6f, 6f, spokePaint)
+        canvas.drawRoundRect(leftRect, 6f, 6f, spokeBorderPaint)
+
+        // Right spoke (0 deg)
+        val rightRect = RectF(cx + hubR * 0.7f, cy - spokeW / 2f, cx + r, cy + spokeW / 2f)
+        canvas.drawRoundRect(rightRect, 6f, 6f, spokePaint)
+        canvas.drawRoundRect(rightRect, 6f, 6f, spokeBorderPaint)
+
+        // Bottom spoke (90 deg)
+        val bottomRect = RectF(cx - spokeW / 2f, cy + hubR * 0.7f, cx + spokeW / 2f, cy + r)
+        canvas.drawRoundRect(bottomRect, 6f, 6f, spokePaint)
+        canvas.drawRoundRect(bottomRect, 6f, 6f, spokeBorderPaint)
+
+        // Center hub
+        val hubBgPaint = Paint().apply {
+            color = if (wheelPointerId != null) Color.parseColor("#183048") else Color.parseColor("#121722")
+            style = Paint.Style.FILL
+            isAntiAlias = true
+        }
+        canvas.drawCircle(cx, cy, hubR, hubBgPaint)
+        canvas.drawCircle(cx, cy, hubR, rimBorderPaint)
+
+        // Horn badge in center
+        val hubIconPaint = Paint().apply {
+            color = Color.WHITE
+            textSize = hubR * 0.85f
+            textAlign = Paint.Align.CENTER
+            isAntiAlias = true
+        }
+        val fm = hubIconPaint.fontMetrics
+        val hubBaseline = cy - (fm.ascent + fm.descent) / 2f
+        canvas.drawText("🚗", cx, hubBaseline, hubIconPaint)
+
+        canvas.restore()
+
+        // Draw steer angle display with dynamic steering indicators below wheel
+        if (!isEditMode) {
+            val angleText = "${visualWheelAngle.toInt()}°"
+            val leftChevrons = if (visualWheelAngle < -15f) "◀◀" else "◀"
+            val rightChevrons = if (visualWheelAngle > 15f) "▶▶" else "▶"
+            val angleDisplay = "$leftChevrons  $angleText  $rightChevrons"
+            val anglePaint = Paint(subTextPaint).apply {
+                color = if (visualWheelAngle < -15f || visualWheelAngle > 15f) Color.parseColor("#00E5FF") else Color.parseColor("#B0BEC5")
+                textSize = min(W, H) * 0.026f * el.scale
+                typeface = Typeface.DEFAULT_BOLD
+            }
+            canvas.drawText(angleDisplay, cx, cy + r + 34f, anglePaint)
+        } else {
+            canvas.drawText("STEERING WHEEL", cx, cy + r + 34f, textPaint)
+        }
+    }
+
+    private fun getRadialChipPositions(el: HudElement, W: Float, H: Float): List<Pair<SteeringMode, PointF>> {
+        val btnCx = el.xPct * W
+        val btnCy = el.yPct * H
+        val dist = (H * 0.28f).coerceIn(120f, 220f)
+
+        val angles = if (btnCx > W * 0.65f) {
+            listOf(-165f, -140f, -115f, -90f)
+        } else if (btnCx < W * 0.35f) {
+            listOf(-90f, -65f, -40f, -15f)
+        } else {
+            listOf(-145f, -110f, -75f, -40f)
+        }
+        val modes = listOf(SteeringMode.OFF, SteeringMode.PEDALS, SteeringMode.WHEEL, SteeringMode.HELICOPTER)
+        return modes.mapIndexed { idx, mode ->
+            val rad = Math.toRadians(angles[idx].toDouble())
+            val px = (btnCx + Math.cos(rad) * dist).toFloat().coerceIn(80f, W - 80f)
+            val py = (btnCy + Math.sin(rad) * dist).toFloat().coerceIn(50f, H - 50f)
+            Pair(mode, PointF(px, py))
+        }
+    }
+
+    private fun updateRadialHover(el: HudElement, x: Float, y: Float) {
+        val chips = getRadialChipPositions(el, width.toFloat(), height.toFloat())
+        val threshold = 75f
+        val closest = chips.minByOrNull { hypot((x - it.second.x).toDouble(), (y - it.second.y).toDouble()).toFloat() }
+        val newHover = if (closest != null && hypot((x - closest.second.x).toDouble(), (y - closest.second.y).toDouble()).toFloat() <= threshold) {
+            closest.first
+        } else null
+        if (newHover != steerModeHoveredOption) {
+            steerModeHoveredOption = newHover
+            if (newHover != null) hapticHelper.click()
+            invalidate()
+        }
+    }
+
+    private fun drawRadialModeSelector(canvas: Canvas, W: Float, H: Float) {
+        val el = elements.firstOrNull { it.id == "steer_mode" } ?: return
+        val btnCx = el.xPct * W
+        val btnCy = el.yPct * H
+        val chips = getRadialChipPositions(el, W, H)
+
+        // Backdrop tint
+        canvas.drawColor(Color.parseColor("#66000000"))
+
+        val linePaint = Paint().apply {
+            color = Color.parseColor("#4458A6FF")
+            style = Paint.Style.STROKE
+            strokeWidth = 3f
+            pathEffect = DashPathEffect(floatArrayOf(10f, 10f), 0f)
+            isAntiAlias = true
+        }
+
+        val chipBgPaint = Paint().apply {
+            style = Paint.Style.FILL
+            isAntiAlias = true
+        }
+        val chipBorderPaint = Paint().apply {
+            style = Paint.Style.STROKE
+            strokeWidth = 3.5f
+            isAntiAlias = true
+        }
+        val chipTextPaint = Paint().apply {
+            color = Color.WHITE
+            textSize = 24f
+            textAlign = Paint.Align.CENTER
+            typeface = Typeface.DEFAULT_BOLD
+            isAntiAlias = true
+        }
+
+        for ((mode, pos) in chips) {
+            canvas.drawLine(btnCx, btnCy, pos.x, pos.y, linePaint)
+
+            val isHovered = steerModeHoveredOption == mode
+            val isActive = currentSteeringMode == mode
+            val chipW = if (isHovered) 120f else 105f
+            val chipH = if (isHovered) 48f else 40f
+            val rect = RectF(pos.x - chipW, pos.y - chipH, pos.x + chipW, pos.y + chipH)
+
+            chipBgPaint.color = when {
+                isHovered -> Color.parseColor("#1F6FEB")
+                isActive -> Color.parseColor("#238636")
+                else -> Color.parseColor("#E6161B22")
+            }
+            chipBorderPaint.color = when {
+                isHovered -> Color.parseColor("#58A6FF")
+                isActive -> Color.parseColor("#3FB950")
+                else -> Color.parseColor("#484F58")
+            }
+            chipBorderPaint.strokeWidth = if (isHovered) 5f else 3f
+
+            canvas.drawRoundRect(rect, 24f, 24f, chipBgPaint)
+            canvas.drawRoundRect(rect, 24f, 24f, chipBorderPaint)
+
+            val label = when (mode) {
+                SteeringMode.OFF -> "🕹 NORMAL"
+                SteeringMode.PEDALS -> "🚦 PEDALS"
+                SteeringMode.WHEEL -> "🛞 WHEEL"
+                SteeringMode.HELICOPTER -> "🚁 HELI"
+            }
+            val fm = chipTextPaint.fontMetrics
+            val baseline = pos.y - (fm.ascent + fm.descent) / 2f
+            canvas.drawText(label, pos.x, baseline, chipTextPaint)
+        }
+
+        // Draw finger pointer dot
+        val fingerDotPaint = Paint().apply {
+            color = Color.parseColor("#58A6FF")
+            style = Paint.Style.FILL
+            isAntiAlias = true
+        }
+        val fingerRingPaint = Paint().apply {
+            color = Color.WHITE
+            style = Paint.Style.STROKE
+            strokeWidth = 3f
+            isAntiAlias = true
+        }
+        canvas.drawCircle(steerModeCurrentX, steerModeCurrentY, 14f, fingerDotPaint)
+        canvas.drawCircle(steerModeCurrentX, steerModeCurrentY, 20f, fingerRingPaint)
+    }
+
+    private fun updateSteeringWheel(el: HudElement, x: Float, y: Float) {
+        val cx = el.xPct * width
+        val cy = el.yPct * height
+
+        val v1x = wheelPrevTouchX - cx
+        val v1y = wheelPrevTouchY - cy
+        val v2x = x - cx
+        val v2y = y - cy
+
+        val r1 = hypot(v1x.toDouble(), v1y.toDouble()).toFloat()
+        val r2 = hypot(v2x.toDouble(), v2y.toDouble()).toFloat()
+
+        if (r1 > 15f && r2 > 15f) {
+            val cross = v1x * v2y - v1y * v2x
+            val dot = v1x * v2x + v1y * v2y
+            val deltaRad = kotlin.math.atan2(cross.toDouble(), dot.toDouble())
+            val deltaDeg = Math.toDegrees(deltaRad).toFloat()
+            if (!deltaDeg.isNaN()) {
+                visualWheelAngle = (visualWheelAngle + deltaDeg).coerceIn(-180f, 180f)
+            }
+        }
+        wheelPrevTouchX = x
+        wheelPrevTouchY = y
+
+        val steerNorm = (visualWheelAngle / 135f).coerceIn(-1.0f, 1.0f)
+        state = state.copy(stickX = steerNorm)
+
+        val isLeft = steerNorm < -0.15f
+        val isRight = steerNorm > 0.15f
+        if (isLeft != wheelSteeringLeft) {
+            wheelSteeringLeft = isLeft
+            onMacroKeyRequested?.invoke("a", isLeft)
+            if (isLeft) hapticHelper.tick()
+        }
+        if (isRight != wheelSteeringRight) {
+            wheelSteeringRight = isRight
+            onMacroKeyRequested?.invoke("d", isRight)
+            if (isRight) hapticHelper.tick()
+        }
+    }
+
+    private fun animateWheelReturn() {
+        val startAngle = visualWheelAngle
+        if (startAngle == 0f) return
+        wheelSpringAnimator?.cancel()
+        wheelSpringAnimator = android.animation.ValueAnimator.ofFloat(startAngle, 0f).apply {
+            duration = 180L
+            interpolator = android.view.animation.DecelerateInterpolator()
+            addUpdateListener {
+                visualWheelAngle = it.animatedValue as Float
+                val steerNorm = (visualWheelAngle / 135f).coerceIn(-1.0f, 1.0f)
+                state = state.copy(stickX = steerNorm)
+                emitState()
+                invalidate()
+            }
+        }
+        wheelSpringAnimator?.start()
     }
 
     private fun drawEditModeGrid(canvas: Canvas, W: Float, H: Float) {
@@ -470,7 +957,87 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
         canvas.drawText("HUD EDIT MODE - Tap to select, drag to reposition", W * 0.5f, 50f, editBannerPaint)
     }
 
+    private fun drawHeliStickElement(canvas: Canvas, el: HudElement, W: Float, H: Float) {
+        val cx = el.xPct * W
+        val cy = el.yPct * H
+        val r = H * 0.16f * el.scale
+
+        // Main stick base circle
+        val currentFill = if (isEditMode && !el.isEnabled) disabledFillPaint else fillPaint
+        val currentOutline = if (isEditMode && !el.isEnabled) disabledOutlinePaint else outlinePaint
+        canvas.drawCircle(cx, cy, r, currentFill)
+        canvas.drawCircle(cx, cy, r, currentOutline)
+
+        // Guide crosshair & inner ring
+        val guidePaint = Paint(outlinePaint).apply {
+            strokeWidth = 2f
+            color = Color.parseColor("#384B66")
+        }
+        canvas.drawLine(cx - r * 0.75f, cy, cx + r * 0.75f, cy, guidePaint)
+        canvas.drawLine(cx, cy - r * 0.75f, cx, cy + r * 0.75f, guidePaint)
+        canvas.drawCircle(cx, cy, r * 0.5f, guidePaint)
+
+        // Direction indicators (Up: 8, Down: 5, Left: 4, Right: 6)
+        val dirPaint = Paint().apply {
+            textSize = r * 0.20f
+            textAlign = Paint.Align.CENTER
+            isAntiAlias = true
+            color = Color.parseColor("#80B0D0")
+        }
+        val activeDirPaint = Paint().apply {
+            textSize = r * 0.22f
+            textAlign = Paint.Align.CENTER
+            isAntiAlias = true
+            color = Color.parseColor("#4FC3F7")
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+        }
+
+        val upLabel = "▲ ${el.dpadUpKey.uppercase().replace("NUM", "")}"
+        val downLabel = "▼ ${el.dpadDownKey.uppercase().replace("NUM", "")}"
+        val leftLabel = "◀ ${el.dpadLeftKey.uppercase().replace("NUM", "")}"
+        val rightLabel = "▶ ${el.dpadRightKey.uppercase().replace("NUM", "")}"
+
+        canvas.drawText(upLabel, cx, cy - r * 0.60f, if (heli8Active) activeDirPaint else dirPaint)
+        canvas.drawText(downLabel, cx, cy + r * 0.80f, if (heli5Active) activeDirPaint else dirPaint)
+        canvas.drawText(leftLabel, cx - r * 0.58f, cy + r * 0.08f, if (heli4Active) activeDirPaint else dirPaint)
+        canvas.drawText(rightLabel, cx + r * 0.58f, cy + r * 0.08f, if (heli6Active) activeDirPaint else dirPaint)
+
+        // Thumb stick head
+        val headX = if (!isEditMode) cx + visualHeliStickX * r * 0.5f else cx
+        val headY = if (!isEditMode) cy + visualHeliStickY * r * 0.5f else cy
+        val headFill = if (isEditMode && !el.isEnabled) disabledFillPaint else if (heliStickPointerId != null) customFillActivePaint else fillActivePaint
+        canvas.drawCircle(headX, headY, r * 0.44f, headFill)
+        if (heliStickPointerId != null) {
+            canvas.drawCircle(headX, headY, r * 0.44f + 2f, toggleLatchedPaint)
+        }
+
+        // Center stick label
+        textPaint.textSize = min(W, H) * 0.028f * el.scale
+        val stickLabel = el.label.ifEmpty { "HELI 🚁" }
+        canvas.drawText(stickLabel, cx, cy - r * 0.12f, textPaint)
+
+        subTextPaint.textSize = min(W, H) * 0.016f * el.scale
+        canvas.drawText("PITCH / ROLL", cx, cy + r * 0.16f, subTextPaint)
+
+        // In Edit Mode: Draw mini gear ⚙ icon badge at bottom-right of the stick
+        if (isEditMode) {
+            val badgeR = (r * 0.22f).coerceIn(15f, 30f)
+            val badgeX = cx + r * 0.72f
+            val badgeY = cy + r * 0.72f
+            canvas.drawCircle(badgeX, badgeY, badgeR, gearBadgeBgPaint)
+            canvas.drawCircle(badgeX, badgeY, badgeR, gearBadgeBorderPaint)
+            gearBadgeIconPaint.textSize = badgeR * 1.25f
+            val fm = gearBadgeIconPaint.fontMetrics
+            val baseline = badgeY - (fm.ascent + fm.descent) / 2f
+            canvas.drawText("⚙", badgeX, baseline, gearBadgeIconPaint)
+        }
+    }
+
     private fun drawStickElement(canvas: Canvas, el: HudElement, W: Float, H: Float) {
+        if (el.id == "heli_stick") {
+            drawHeliStickElement(canvas, el, W, H)
+            return
+        }
         val cx = if (stickFloatingMode && !isEditMode && dynamicStickOriginX != null) dynamicStickOriginX!! else el.xPct * W
         val cy = if (stickFloatingMode && !isEditMode && dynamicStickOriginY != null) dynamicStickOriginY!! else el.yPct * H
         val r = H * 0.16f * el.scale
@@ -573,6 +1140,16 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
         "mouse_left", "lmb" -> "LMB"
         "mouse_right", "rmb" -> "RMB"
         "mouse_middle", "mmb" -> "MMB"
+        "num8" -> "NUM 8"
+        "num4" -> "NUM 4"
+        "num5" -> "NUM 5"
+        "num6" -> "NUM 6"
+        "num7" -> "NUM 7"
+        "num9" -> "NUM 9"
+        "num1" -> "NUM 1"
+        "num2" -> "NUM 2"
+        "num3" -> "NUM 3"
+        "num0" -> "NUM 0"
         else -> key.uppercase()
     }
 
@@ -681,12 +1258,14 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
         }
 
         val active = isButtonActive(el)
+
         val isLatched = el.isToggle && latchedButtons.contains(zoneKey)
         val isTurboPulse = el.isTurbo && (turboPulseState[zoneKey] == true)
         val isMacroActive = activeMacroButtons.contains(el.id)
 
         val currentFill = when {
             isEditMode && !el.isEnabled -> disabledFillPaint
+            el.id == "steer_mode" -> if (active) customFillActivePaint else if (currentSteeringMode != SteeringMode.OFF) steerModeActiveFillPaint else fillPaint
             el.isCustom && active -> customFillActivePaint
             el.isCustom -> customFillPaint
             active -> fillActivePaint
@@ -694,6 +1273,7 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
         }
         val currentOutline = when {
             isEditMode && !el.isEnabled -> disabledOutlinePaint
+            el.id == "steer_mode" -> if (currentSteeringMode != SteeringMode.OFF) steerModeActiveOutlinePaint else outlinePaint
             el.isCustom -> customOutlinePaint
             else -> outlinePaint
         }
@@ -736,6 +1316,7 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
                 }
             }
         }
+
         drawButtonLabels(canvas, el, drawCx, drawCy, W, H)
 
         if (hasRotation) {
@@ -758,7 +1339,24 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
     private fun drawButtonLabels(canvas: Canvas, el: HudElement, cx: Float, cy: Float, W: Float, H: Float) {
         val r = getButtonRadius(el, H)
 
-        val rawLabel = el.label.trim()
+        val rawLabel = when (el.id) {
+            "steer_mode" -> when (currentSteeringMode) {
+                SteeringMode.OFF -> "🚗 NORMAL"
+                SteeringMode.PEDALS -> "🚦 PEDALS"
+                SteeringMode.WHEEL -> "🛞 WHEEL"
+                SteeringMode.HELICOPTER -> "🚁 HELI"
+            }
+            "pedal_gas", "wheel_gas" -> el.label.ifEmpty { "ACCEL" }
+            "pedal_brake", "wheel_brake" -> el.label.ifEmpty { "BRAKE" }
+            "steer_left" -> el.label.ifEmpty { "◀ LEFT" }
+            "steer_right" -> el.label.ifEmpty { "RIGHT ▶" }
+            "steer_handbrake" -> el.label.ifEmpty { "(P) SPACE" }
+            "heli_8" -> el.label.ifEmpty { "8" }
+            "heli_4" -> el.label.ifEmpty { "4" }
+            "heli_5" -> el.label.ifEmpty { "5" }
+            "heli_6" -> el.label.ifEmpty { "6" }
+            else -> el.label.trim()
+        }
         val mainLabel = when {
             rawLabel.isNotEmpty() -> {
                 if (rawLabel.contains(" (") && rawLabel.endsWith(")")) {
@@ -898,6 +1496,10 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
                 val r = H * 0.16f * el.scale + 12f
                 canvas.drawCircle(cx, cy, r, selectedOutlinePaint)
             }
+            ElementType.STEERING_WHEEL -> {
+                val r = H * 0.17f * el.scale + 12f
+                canvas.drawCircle(cx, cy, r, selectedOutlinePaint)
+            }
             ElementType.DPAD -> {
                 val r = H * 0.14f * el.scale + 12f
                 canvas.drawCircle(cx, cy, r, selectedOutlinePaint)
@@ -956,6 +1558,34 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
             val btn = getStockBtn(btnId)
             if (btn != null) {
                 state = state.withButton(btn, pressed)
+            } else {
+                val el = elements.firstOrNull { it.id == btnId }
+                val targetKey = el?.key?.ifEmpty { null }
+                if (targetKey != null) {
+                    onMacroKeyRequested?.invoke(targetKey, pressed)
+                }
+                when (btnId) {
+                    "pedal_gas", "wheel_gas" -> {
+                        if (targetKey == null) onMacroKeyRequested?.invoke("w", pressed)
+                        state = state.copy(stickY = if (pressed) -1.0f else 0f)
+                    }
+                    "pedal_brake", "wheel_brake" -> {
+                        if (targetKey == null) onMacroKeyRequested?.invoke("s", pressed)
+                        state = state.copy(stickY = if (pressed) 1.0f else 0f)
+                    }
+                    "steer_left" -> {
+                        if (targetKey == null) onMacroKeyRequested?.invoke("a", pressed)
+                        state = state.copy(stickX = if (pressed) -1.0f else 0f)
+                    }
+                    "steer_right" -> {
+                        if (targetKey == null) onMacroKeyRequested?.invoke("d", pressed)
+                        state = state.copy(stickX = if (pressed) 1.0f else 0f)
+                    }
+                    "steer_handbrake" -> {
+                        if (targetKey == null) onMacroKeyRequested?.invoke("space", pressed)
+                        state = state.withButton(Btn.A, pressed)
+                    }
+                }
             }
         }
     }
@@ -1052,6 +1682,17 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
         instantTapPulseState.clear()
     }
 
+    private fun drawEditGearBadge(canvas: Canvas, el: HudElement, cx: Float, cy: Float, W: Float, H: Float) {
+        val (badgeX, badgeY) = getGearBadgeCenter(el, cx, cy, W, H)
+        val badgeR = getGearBadgeRadius(el, H)
+        canvas.drawCircle(badgeX, badgeY, badgeR, gearBadgeBgPaint)
+        canvas.drawCircle(badgeX, badgeY, badgeR, gearBadgeBorderPaint)
+        gearBadgeIconPaint.textSize = badgeR * 1.25f
+        val fm = gearBadgeIconPaint.fontMetrics
+        val baseline = badgeY - (fm.ascent + fm.descent) / 2f
+        canvas.drawText("⚙", badgeX, baseline, gearBadgeIconPaint)
+    }
+
     private fun getButtonRadius(el: HudElement, H: Float): Float = H * 0.075f * el.scale
 
     private fun getButtonSquare(el: HudElement, cx: Float, cy: Float, H: Float): RectF {
@@ -1061,8 +1702,9 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
 
     private fun getButtonRect(el: HudElement, cx: Float, cy: Float, W: Float, H: Float): RectF {
         val isSystem = el.id in listOf("small_icon", "hamburger_icon")
-        val halfW = (if (isSystem) W * 0.038f else W * 0.06f) * el.scale
-        val halfH = H * 0.05f * el.scale
+        val isPedal = el.id in listOf("pedal_gas", "pedal_brake", "wheel_gas", "wheel_brake")
+        val halfW = (if (isSystem) W * 0.038f else if (isPedal) W * 0.048f else W * 0.06f) * el.scale
+        val halfH = (if (isPedal) H * 0.075f else H * 0.05f) * el.scale
         return RectF(cx - halfW, cy - halfH, cx + halfW, cy + halfH)
     }
 
@@ -1103,6 +1745,7 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
     // Touch Hit Testing
     // -------------------------------------------------------------------
     fun findElementAt(x: Float, y: Float): HudElement? {
+        if (!isEditMode && !areButtonsVisible) return null
         val W = width.toFloat()
         val H = height.toFloat()
         val sortedList = elements.sortedByDescending { it.zOrder }
@@ -1111,17 +1754,26 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
         var exactMatch: HudElement? = null
         for (el in sortedList) {
             if (!isEditMode && !el.isEnabled) continue
+            if (!isElementVisibleInCurrentMode(el)) continue
             val cx = el.xPct * W
             val cy = el.yPct * H
             val isExactHit = when (el.type) {
                 ElementType.STICK -> {
                     val r = H * 0.16f * el.scale
-                    val notchX = cx
-                    val notchY = cy - r * 1.55f
-                    val notchR = r * 0.38f
-                    val hitMain = hypot(x - cx, y - cy) <= r
-                    val hitNotch = stickSprintMode && hypot(x - notchX, y - notchY) <= notchR * 1.6f
-                    hitMain || hitNotch
+                    if (el.id == "heli_stick") {
+                        hypot(x - cx, y - cy) <= r
+                    } else {
+                        val notchX = cx
+                        val notchY = cy - r * 1.55f
+                        val notchR = r * 0.38f
+                        val hitMain = hypot(x - cx, y - cy) <= r
+                        val hitNotch = stickSprintMode && hypot(x - notchX, y - notchY) <= notchR * 1.6f
+                        hitMain || hitNotch
+                    }
+                }
+                ElementType.STEERING_WHEEL -> {
+                    val r = H * 0.17f * el.scale
+                    hypot((x - cx).toDouble(), (y - cy).toDouble()).toFloat() <= r * 1.35f
                 }
                 ElementType.DPAD -> {
                     val r = H * 0.14f * el.scale
@@ -1180,6 +1832,7 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
 
         for (el in sortedList) {
             if (!isEditMode && !el.isEnabled) continue
+            if (!isElementVisibleInCurrentMode(el)) continue
             val cx = el.xPct * W
             val cy = el.yPct * H
             when (el.type) {
@@ -1324,23 +1977,24 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
                 val W = width.toFloat()
                 val H = height.toFloat()
 
-                // Check if user tapped the gear icon badge on the STICK element
-                val stickGearTarget = elements.firstOrNull { it.type == ElementType.STICK }
-                if (stickGearTarget != null) {
-                    val stickCx = stickGearTarget.xPct * W
-                    val stickCy = stickGearTarget.yPct * H
-                    val stickR = H * 0.16f * stickGearTarget.scale
-                    val sBadgeR = (stickR * 0.22f).coerceIn(15f, 30f)
-                    val sBadgeX = stickCx + stickR * 0.72f
-                    val sBadgeY = stickCy + stickR * 0.72f
-                    val sTouchRadius = (sBadgeR * 1.5f).coerceAtLeast(32f)
-                    if (hypot(event.x - sBadgeX, event.y - sBadgeY) <= sTouchRadius) {
-                        selectedElement = stickGearTarget
-                        onElementSelected?.invoke(stickGearTarget)
-                        invalidate()
-                        onOpenStickSettingsRequested?.invoke(stickGearTarget)
-                        return true
+                // Check if user tapped the gear icon badge on any STICK element
+                val stickGearTarget = elements.filter { it.type == ElementType.STICK }
+                    .firstOrNull { stickEl ->
+                        val stickCx = stickEl.xPct * W
+                        val stickCy = stickEl.yPct * H
+                        val stickR = H * 0.16f * stickEl.scale
+                        val sBadgeR = (stickR * 0.22f).coerceIn(15f, 30f)
+                        val sBadgeX = stickCx + stickR * 0.72f
+                        val sBadgeY = stickCy + stickR * 0.72f
+                        val sTouchRadius = (sBadgeR * 1.5f).coerceAtLeast(32f)
+                        hypot(event.x - sBadgeX, event.y - sBadgeY) <= sTouchRadius
                     }
+                if (stickGearTarget != null) {
+                    selectedElement = stickGearTarget
+                    onElementSelected?.invoke(stickGearTarget)
+                    invalidate()
+                    onOpenStickSettingsRequested?.invoke(stickGearTarget)
+                    return true
                 }
 
                 // Check if user tapped the gear icon badge on any BUTTON element
@@ -1436,6 +2090,7 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
                 lookPointerId = null
                 accumDx = 0f
                 accumDy = 0f
+                resetHeliStick()
                 state = ControllerState()
             }
         }
@@ -1447,8 +2102,45 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
     private fun handlePointerDown(id: Int, x: Float, y: Float) {
         val el = findElementAt(x, y)
         if (el != null) {
+            if (el.id == "steer_mode") {
+                steerModePointerId = id
+                steerModeDownX = x
+                steerModeDownY = y
+                steerModeCurrentX = x
+                steerModeCurrentY = y
+                steerModeHoveredOption = null
+                isRadialSelectorOpen = false
+                steerModeLongPressRunnable?.let { steerModeLongPressHandler.removeCallbacks(it) }
+                val runnable = Runnable {
+                    if (steerModePointerId == id) {
+                        isRadialSelectorOpen = true
+                        hapticHelper.heavyClick()
+                        invalidate()
+                    }
+                }
+                steerModeLongPressRunnable = runnable
+                steerModeLongPressHandler.postDelayed(runnable, 450L)
+                pointerZone[id] = "steer_mode"
+                hapticHelper.click()
+                return
+            }
+
             when (el.type) {
+                ElementType.STEERING_WHEEL -> {
+                    wheelPointerId = id
+                    wheelSpringAnimator?.cancel()
+                    wheelPrevTouchX = x
+                    wheelPrevTouchY = y
+                    pointerZone[id] = "steering_wheel"
+                    hapticHelper.click()
+                }
                 ElementType.STICK -> {
+                    if (el.id == "heli_stick") {
+                        heliStickPointerId = id
+                        pointerZone[id] = "heli_stick"
+                        updateHeliStick(el, x, y)
+                        return
+                    }
                     if (stickSprintMode && isAutoRunLocked) {
                         // Tapping stick cancels auto-run lock!
                         resetSprint()
@@ -1528,7 +2220,7 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
             }
         } else {
             // Check if touch is in left dark box empty area (left 50%) and stickFloatingMode is active!
-            if (!isEditMode && stickFloatingMode && x < width * 0.50f && !pointerZone.values.contains("stick")) {
+            if (!isEditMode && areButtonsVisible && currentSteeringMode == SteeringMode.OFF && stickFloatingMode && x < width * 0.50f && !pointerZone.values.contains("stick")) {
                 val stickEl = elements.firstOrNull { it.type == ElementType.STICK }
                 if (stickEl != null) {
                     dynamicStickOriginX = x
@@ -1553,9 +2245,29 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
 
     private fun handlePointerMove(id: Int, x: Float, y: Float) {
         when (pointerZone[id]) {
+            "steer_mode" -> {
+                steerModeCurrentX = x
+                steerModeCurrentY = y
+                if (isRadialSelectorOpen) {
+                    val steerEl = elements.firstOrNull { it.id == "steer_mode" }
+                    if (steerEl != null) {
+                        updateRadialHover(steerEl, x, y)
+                    }
+                }
+            }
+            "steering_wheel" -> {
+                val wheelEl = elements.firstOrNull { it.type == ElementType.STEERING_WHEEL }
+                if (wheelEl != null) {
+                    updateSteeringWheel(wheelEl, x, y)
+                }
+            }
             "stick" -> {
                 val stickEl = elements.firstOrNull { it.type == ElementType.STICK }
                 stickEl?.let { updateStick(it, x, y) }
+            }
+            "heli_stick" -> {
+                val heliEl = elements.firstOrNull { it.id == "heli_stick" }
+                heliEl?.let { updateHeliStick(it, x, y) }
             }
             "dpad" -> {
                 val dpadEl = elements.firstOrNull { it.type == ElementType.DPAD }
@@ -1637,7 +2349,7 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
                                 lookPointerId = id
                                 lastLookX = x
                                 lastLookY = y
-                            } else if (stickFloatingMode && x < width * 0.50f && !pointerZone.values.contains("stick")) {
+                            } else if (stickFloatingMode && currentSteeringMode == SteeringMode.OFF && x < width * 0.50f && !pointerZone.values.contains("stick")) {
                                 val stickEl = elements.firstOrNull { it.type == ElementType.STICK }
                                 if (stickEl != null) {
                                     dynamicStickOriginX = x
@@ -1676,6 +2388,50 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
     private fun handlePointerUp(id: Int) {
         val zone = pointerZone[id]
         when (zone) {
+            "steer_mode" -> {
+                steerModeLongPressRunnable?.let { steerModeLongPressHandler.removeCallbacks(it) }
+                if (isRadialSelectorOpen) {
+                    isRadialSelectorOpen = false
+                    val chosenMode = steerModeHoveredOption
+                    if (chosenMode != null) {
+                        currentSteeringMode = chosenMode
+                        HudConfig.setSteeringMode(context, currentSteeringMode)
+                        if (chosenMode != SteeringMode.OFF) {
+                            lastActiveSteeringMode = chosenMode
+                        }
+                        hapticHelper.heavyClick()
+                    }
+                } else {
+                    // Quick tap (<450ms): toggle between OFF and lastActiveSteeringMode
+                    val newMode = if (currentSteeringMode == SteeringMode.OFF) lastActiveSteeringMode else SteeringMode.OFF
+                    currentSteeringMode = newMode
+                    HudConfig.setSteeringMode(context, currentSteeringMode)
+                    hapticHelper.click()
+                }
+                steerModePointerId = null
+                steerModeHoveredOption = null
+                pointerZone.remove(id)
+                invalidate()
+            }
+            "steering_wheel" -> {
+                wheelPointerId = null
+                pointerZone.remove(id)
+                if (wheelSteeringLeft) {
+                    wheelSteeringLeft = false
+                    onMacroKeyRequested?.invoke("a", false)
+                }
+                if (wheelSteeringRight) {
+                    wheelSteeringRight = false
+                    onMacroKeyRequested?.invoke("d", false)
+                }
+                state = state.copy(stickX = 0f)
+                animateWheelReturn()
+            }
+            "heli_stick" -> {
+                heliStickPointerId = null
+                pointerZone.remove(id)
+                resetHeliStick()
+            }
             "stick" -> {
                 dynamicStickOriginX = null
                 dynamicStickOriginY = null
@@ -1928,6 +2684,20 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
      * Called during Touch Optimization to ensure a completely clean input state.
      */
     fun resetTouchPointers() {
+        steerModeLongPressRunnable?.let { steerModeLongPressHandler.removeCallbacks(it) }
+        isRadialSelectorOpen = false
+        steerModePointerId = null
+        steerModeHoveredOption = null
+        wheelPointerId = null
+        visualWheelAngle = 0f
+        if (wheelSteeringLeft) {
+            wheelSteeringLeft = false
+            onMacroKeyRequested?.invoke("a", false)
+        }
+        if (wheelSteeringRight) {
+            wheelSteeringRight = false
+            onMacroKeyRequested?.invoke("d", false)
+        }
         pointerZone.clear()
         buttonPointerLastX.clear()
         buttonPointerLastY.clear()
@@ -2255,10 +3025,19 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
         }
     }
 
+    private val steeringButtonIds = setOf(
+        "pedal_gas", "pedal_brake", "wheel_gas", "wheel_brake",
+        "steer_left", "steer_right", "steer_handbrake"
+    )
+
     private fun requestMacroKey(key: String, pressed: Boolean) {
         onMacroKeyRequested?.invoke(key, pressed)
 
-        val matchingEl = elements.firstOrNull { it.type == ElementType.BUTTON && it.key.equals(key, ignoreCase = true) }
+        val matchingEl = elements.firstOrNull {
+            it.type == ElementType.BUTTON &&
+            it.key.equals(key, ignoreCase = true) &&
+            it.id !in steeringButtonIds
+        }
         if (matchingEl != null) {
             setButtonState(getZoneKey(matchingEl), pressed)
         } else {
