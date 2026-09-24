@@ -559,8 +559,36 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
         return (state.buttons and (1 shl btn.bit)) != 0
     }
 
+    /**
+     * Returns true if RMB (Right Mouse Button / Scope / Aim) is currently pressed.
+     */
+    fun isRmbHeld(): Boolean {
+        if (isButtonHeld(Btn.LT)) return true
+        for (zone in pointerZone.values) {
+            val el = elements.firstOrNull { getZoneKey(it) == zone }
+            if (el != null && (el.key.equals("mouse_right", ignoreCase = true) || el.key.equals("rmb", ignoreCase = true) || el.id == "lt")) {
+                return true
+            }
+        }
+        return false
+    }
+
+    /**
+     * Returns true if LMB (Left Mouse Button / Primary Fire) is currently pressed.
+     */
+    fun isLmbHeld(): Boolean {
+        if (isButtonHeld(Btn.RT)) return true
+        for (zone in pointerZone.values) {
+            val el = elements.firstOrNull { getZoneKey(it) == zone }
+            if (el != null && (el.key.equals("mouse_left", ignoreCase = true) || el.key.equals("lmb", ignoreCase = true) || el.id == "rt")) {
+                return true
+            }
+        }
+        return false
+    }
+
     fun isAimActive(): Boolean {
-        return isLookActive || isButtonHeld(Btn.LT) || isButtonHeld(Btn.RT)
+        return isLookActive || isRmbHeld() || isLmbHeld()
     }
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {

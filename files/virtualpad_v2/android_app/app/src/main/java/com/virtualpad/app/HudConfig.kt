@@ -1747,6 +1747,26 @@ object HudConfig {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit().putFloat(KEY_GYRO_SENS_Y, sens).apply()
     }
 
+    // Scoped / ADS (Holding RMB) Gyro Sensitivity
+    private const val KEY_GYRO_SCOPED_SENS_ENABLED = "gyro_scoped_sens_enabled"
+    private const val KEY_GYRO_SCOPED_SENS = "gyro_scoped_sens"
+
+    fun isGyroScopedSensEnabled(context: Context): Boolean {
+        return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getBoolean(KEY_GYRO_SCOPED_SENS_ENABLED, true)
+    }
+
+    fun setGyroScopedSensEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit().putBoolean(KEY_GYRO_SCOPED_SENS_ENABLED, enabled).apply()
+    }
+
+    fun getGyroScopedSens(context: Context): Float {
+        return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getFloat(KEY_GYRO_SCOPED_SENS, 0.75f)
+    }
+
+    fun setGyroScopedSens(context: Context, sens: Float) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit().putFloat(KEY_GYRO_SCOPED_SENS, sens).apply()
+    }
+
     fun isGyroAimOnly(context: Context): Boolean {
         return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getBoolean(KEY_GYRO_AIM_ONLY, false)
     }
