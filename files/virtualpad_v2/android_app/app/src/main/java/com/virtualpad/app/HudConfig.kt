@@ -1598,8 +1598,18 @@ object HudConfig {
     private const val KEY_STEERING_MODE = "steering_mode"
 
     fun getSteeringMode(context: Context): SteeringMode {
-        val name = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getString(KEY_STEERING_MODE, SteeringMode.OFF.name) ?: SteeringMode.OFF.name
-        return try { SteeringMode.valueOf(name) } catch (_: Exception) { SteeringMode.OFF }
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return try {
+            val raw = prefs.all[KEY_STEERING_MODE]
+            when (raw) {
+                is String -> try { SteeringMode.valueOf(raw) } catch (_: Exception) { SteeringMode.OFF }
+                is Int -> SteeringMode.values().firstOrNull { it.id == raw } ?: SteeringMode.OFF
+                is Number -> SteeringMode.values().firstOrNull { it.id == raw.toInt() } ?: SteeringMode.OFF
+                else -> SteeringMode.OFF
+            }
+        } catch (_: Exception) {
+            SteeringMode.OFF
+        }
     }
 
     fun setSteeringMode(context: Context, mode: SteeringMode) {
@@ -1649,8 +1659,18 @@ object HudConfig {
     }
 
     fun getAimCurveMode(context: Context): AimCurveMode {
-        val name = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getString(KEY_AIM_CURVE_MODE, AimCurveMode.LINEAR.name) ?: AimCurveMode.LINEAR.name
-        return try { AimCurveMode.valueOf(name) } catch (_: Exception) { AimCurveMode.LINEAR }
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return try {
+            val raw = prefs.all[KEY_AIM_CURVE_MODE]
+            when (raw) {
+                is String -> try { AimCurveMode.valueOf(raw) } catch (_: Exception) { AimCurveMode.LINEAR }
+                is Int -> AimCurveMode.values().getOrNull(raw) ?: AimCurveMode.LINEAR
+                is Number -> AimCurveMode.values().getOrNull(raw.toInt()) ?: AimCurveMode.LINEAR
+                else -> AimCurveMode.LINEAR
+            }
+        } catch (_: Exception) {
+            AimCurveMode.LINEAR
+        }
     }
 
     fun setAimCurveMode(context: Context, mode: AimCurveMode) {

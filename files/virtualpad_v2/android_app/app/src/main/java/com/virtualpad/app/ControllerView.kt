@@ -533,6 +533,12 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
         stickTouchScale = HudConfig.getStickTouchScale(context)
         stickFloatingMode = HudConfig.isStickFloatingMode(context)
         currentSteeringMode = HudConfig.getSteeringMode(context)
+        isDpiNormalizationEnabled = HudConfig.isDpiNormalizationEnabled(context)
+        isJitterFilterEnabled = HudConfig.isJitterFilterEnabled(context)
+        jitterFilterThreshold = HudConfig.getJitterFilterThreshold(context)
+        aimCurveMode = HudConfig.getAimCurveMode(context)
+        sCurveDampening = HudConfig.getSCurveDampening(context)
+        sCurveFlickBoost = HudConfig.getSCurveFlickBoost(context)
         elements.addAll(HudConfig.loadLayout(context))
     }
 
