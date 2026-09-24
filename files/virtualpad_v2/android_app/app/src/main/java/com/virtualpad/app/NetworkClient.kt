@@ -295,11 +295,9 @@ class NetworkClient {
                 // completely bypassing SingleThreadExecutor queuing and GC allocations.
                 writeUsbStateDirect(state)
             } else {
-                // Zero-allocation UDP streaming for 1000Hz ultra-polling:
-                // Reuses pre-allocated datagram packet and byte array, eliminating GC allocation pressure.
-                sendExecutor.execute {
-                    writeUdpStateDirect(state, redundantBurst = (buttonChanged && mode == TransportMode.WIFI))
-                }
+                // Zero-allocation direct UDP streaming on touch thread:
+                // Completely eliminates SingleThreadExecutor queuing latency, context switches, and Runnable allocations.
+                writeUdpStateDirect(state, redundantBurst = (buttonChanged && mode == TransportMode.WIFI))
             }
             // mouse delta is one-shot; don't let the heartbeat replay it
             lastSent = state.copy(mouseDx = 0, mouseDy = 0)

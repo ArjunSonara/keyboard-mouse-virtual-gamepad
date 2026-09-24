@@ -13,9 +13,16 @@ import socket
 import struct
 import threading
 import ctypes
+import atexit
 import subprocess
-import json
-import shutil
+
+if sys.platform == "win32":
+    try:
+        ctypes.windll.winmm.timeBeginPeriod(1)
+        atexit.register(ctypes.windll.winmm.timeEndPeriod, 1)
+        print("[System] Windows high-resolution multimedia timer initialized (1.0ms resolution).")
+    except Exception as e:
+        print(f"[System] Warning: could not set 1ms timer resolution: {e}")
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(line_buffering=True)
@@ -130,19 +137,24 @@ def move_mouse_relative(dx: int, dy: int):
         return
 
     _mouse_move_count += 1
-    try:
-        ctypes.windll.user32.mouse_event(0x0001, int(dx), int(dy), 0, 0)
-    except Exception:
-        pass
 
+    # Clean exclusive routing:
+    # 1. Forward raw stroke through Interception driver kernel filter if available
     if _interception_ctx and _interception_ctx.mouse:
         try:
             stroke = interception.MouseStroke(
                 interception.MouseFlag.MOUSE_MOVE_RELATIVE, 0, 0, int(dx), int(dy)
             )
             _interception_ctx.send(_interception_ctx.mouse, stroke)
+            return
         except Exception:
             pass
+
+    # 2. Fallback to Windows user32 mouse_event only if Interception mouse device is unavailable
+    try:
+        ctypes.windll.user32.mouse_event(0x0001, int(dx), int(dy), 0, 0)
+    except Exception:
+        pass
 
 _held_ctx = {}
 _key_sources = {}
@@ -166,12 +178,10 @@ def _actually_set_key(key: str, should_hold: bool):
         print(f"[Input] Mouse '{mouse_btn}' {'DOWN' if should_hold else 'UP'}", flush=True)
         down_flag, up_flag = MOUSE_EVENT_FLAGS[mouse_btn]
         if should_hold and not is_held:
-            try:
-                ctypes.windll.user32.mouse_event(down_flag, 0, 0, 0, 0)
-            except Exception:
-                pass
-            try:
-                if _interception_ctx and _interception_ctx.mouse:
+            # 1. Prefer exclusive Interception kernel injection
+            sent_interception = False
+            if _interception_ctx and _interception_ctx.mouse:
+                try:
                     btn_state = interception.inputs._get_button_states(mouse_btn, down=True)
                     stroke = interception.MouseStroke(
                         interception.MouseFlag.MOUSE_MOVE_RELATIVE,
@@ -179,16 +189,21 @@ def _actually_set_key(key: str, should_hold: bool):
                         0, 0, 0
                     )
                     _interception_ctx.send(_interception_ctx.mouse, stroke)
-                _held_ctx[key] = True
-            except Exception:
-                _held_ctx[key] = True
+                    sent_interception = True
+                except Exception:
+                    pass
+            # 2. Fallback to user32 mouse_event if Interception unavailable
+            if not sent_interception:
+                try:
+                    ctypes.windll.user32.mouse_event(down_flag, 0, 0, 0, 0)
+                except Exception:
+                    pass
+            _held_ctx[key] = True
         elif not should_hold and is_held:
-            try:
-                ctypes.windll.user32.mouse_event(up_flag, 0, 0, 0, 0)
-            except Exception:
-                pass
-            try:
-                if _interception_ctx and _interception_ctx.mouse:
+            # 1. Prefer exclusive Interception kernel injection
+            sent_interception = False
+            if _interception_ctx and _interception_ctx.mouse:
+                try:
                     btn_state = interception.inputs._get_button_states(mouse_btn, down=False)
                     stroke = interception.MouseStroke(
                         interception.MouseFlag.MOUSE_MOVE_RELATIVE,
@@ -196,8 +211,15 @@ def _actually_set_key(key: str, should_hold: bool):
                         0, 0, 0
                     )
                     _interception_ctx.send(_interception_ctx.mouse, stroke)
-            except Exception:
-                pass
+                    sent_interception = True
+                except Exception:
+                    pass
+            # 2. Fallback to user32 mouse_event if Interception unavailable
+            if not sent_interception:
+                try:
+                    ctypes.windll.user32.mouse_event(up_flag, 0, 0, 0, 0)
+                except Exception:
+                    pass
             _held_ctx.pop(key, None)
     else:
         if should_hold and not is_held:
@@ -422,20 +444,29 @@ def tcp_listener():
                     if not chunk:
                         break
                     buf.extend(chunk)
-                    while len(buf) >= 2:
-                        packet_len = struct.unpack("<H", buf[:2])[0]
+                    # Frame format: 2-byte little endian unsigned short (length) + payload
+                    # Sliding pointer parser: zero array reallocations during 1000Hz ultra-polling
+                    offset = 0
+                    buf_len = len(buf)
+                    while buf_len - offset >= 2:
+                        packet_len = struct.unpack_from("<H", buf, offset)[0]
                         if packet_len > 4096 or packet_len == 0:
-                            # Framing desynchronization guard: discard first byte and search for valid magic
-                            del buf[0]
+                            # Framing desynchronization guard: advance 1 byte
+                            offset += 1
                             continue
-                        if len(buf) < 2 + packet_len:
+                        if buf_len - offset < 2 + packet_len:
                             break
-                        payload = bytes(buf[2 : 2 + packet_len])
-                        del buf[: 2 + packet_len]
+                        payload = bytes(buf[offset + 2 : offset + 2 + packet_len])
+                        offset += 2 + packet_len
                         try:
                             dispatch_packet(payload)
                         except Exception as ex:
                             print(f"[Input Error] {ex}", flush=True)
+                    if offset > 0:
+                        if offset >= buf_len:
+                            buf.clear()
+                        else:
+                            del buf[:offset]
             finally:
                 try:
                     conn.close()

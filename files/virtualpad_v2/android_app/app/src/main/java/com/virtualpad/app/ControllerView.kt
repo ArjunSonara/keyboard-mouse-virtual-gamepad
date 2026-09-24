@@ -12,9 +12,11 @@ import android.graphics.Shader
 import android.graphics.PointF
 import android.graphics.RectF
 import android.graphics.Typeface
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.AttributeSet
+import android.view.InputDevice
 import android.view.MotionEvent
 import android.view.View
 import java.util.concurrent.Executors
@@ -549,6 +551,30 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
         sCurveDampening = HudConfig.getSCurveDampening(context)
         sCurveFlickBoost = HudConfig.getSCurveFlickBoost(context)
         elements.addAll(HudConfig.loadLayout(context))
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            try {
+                requestUnbufferedDispatch(MotionEvent.ACTION_MOVE)
+            } catch (_: Exception) {}
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            try {
+                requestUnbufferedDispatch(InputDevice.SOURCE_TOUCHSCREEN)
+            } catch (_: Exception) {}
+        }
+    }
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        if (isUltraPollingEnabled && Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            try {
+                requestUnbufferedDispatch(MotionEvent.ACTION_MOVE)
+            } catch (_: Exception) {}
+        }
+        if (isUltraPollingEnabled && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            try {
+                requestUnbufferedDispatch(InputDevice.SOURCE_TOUCHSCREEN)
+            } catch (_: Exception) {}
+        }
     }
 
     private var lastDpadQuadrant: Int = -1
@@ -2150,6 +2176,11 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
     private fun handleGameplayTouchEvent(event: MotionEvent): Boolean {
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> {
+                if (isUltraPollingEnabled && Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                    try {
+                        requestUnbufferedDispatch(event)
+                    } catch (_: Exception) {}
+                }
                 val i = event.actionIndex
                 handlePointerDown(event.getPointerId(i), event.getX(i), event.getY(i))
             }

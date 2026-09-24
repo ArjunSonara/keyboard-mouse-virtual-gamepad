@@ -36,6 +36,15 @@ import threading
 import time
 import sys
 import ctypes
+import atexit
+
+if sys.platform == "win32":
+    try:
+        ctypes.windll.winmm.timeBeginPeriod(1)
+        atexit.register(ctypes.windll.winmm.timeEndPeriod, 1)
+        print("[System] Windows high-resolution multimedia timer initialized (1.0ms resolution).")
+    except Exception as e:
+        print(f"[System] Warning: could not set 1ms timer resolution: {e}")
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(line_buffering=True)
@@ -160,21 +169,23 @@ def move_mouse_relative(dx: int, dy: int):
     if _mouse_move_count == 1 or _mouse_move_count % 100 == 0:
         print(f"[Input] Mouse motion: dx={dx}, dy={dy} (events: {_mouse_move_count})")
 
-    # 1. Primary zero-latency Windows relative mouse event (game & desktop compatible)
-    try:
-        ctypes.windll.user32.mouse_event(0x0001, int(dx), int(dy), 0, 0)
-    except Exception:
-        pass
-
-    # 2. Also forward raw stroke through Interception driver if device is available
+    # Clean exclusive routing:
+    # 1. Forward raw stroke through Interception driver kernel filter if available
     if _interception_ctx and _interception_ctx.mouse:
         try:
             stroke = interception.MouseStroke(
                 interception.MouseFlag.MOUSE_MOVE_RELATIVE, 0, 0, int(dx), int(dy)
             )
             _interception_ctx.send(_interception_ctx.mouse, stroke)
+            return
         except Exception:
             pass
+
+    # 2. Fallback to Windows user32 mouse_event only if Interception mouse device is unavailable
+    try:
+        ctypes.windll.user32.mouse_event(0x0001, int(dx), int(dy), 0, 0)
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -214,27 +225,34 @@ def _actually_set_key(key: str, should_hold: bool):
     if mouse_btn:
         down_flag, up_flag = MOUSE_EVENT_FLAGS[mouse_btn]
         if should_hold and not is_held:
-            # 1. Zero-latency Windows mouse event
-            try:
-                ctypes.windll.user32.mouse_event(down_flag, 0, 0, 0, 0)
-            except Exception:
-                pass
-            # 2. Interception mouse hold
+            # 1. Prefer exclusive Interception kernel injection
+            sent_interception = False
             try:
                 ctx = interception.hold_mouse(mouse_btn)
                 ctx.__enter__()
                 _held_ctx[key] = ctx
-            except Exception:
-                _held_ctx[key] = True
-        elif not should_hold and is_held:
-            try:
-                ctypes.windll.user32.mouse_event(up_flag, 0, 0, 0, 0)
+                sent_interception = True
             except Exception:
                 pass
+            # 2. Fallback to user32 mouse_event if Interception unavailable
+            if not sent_interception:
+                try:
+                    ctypes.windll.user32.mouse_event(down_flag, 0, 0, 0, 0)
+                except Exception:
+                    pass
+                _held_ctx[key] = True
+        elif not should_hold and is_held:
             ctx = _held_ctx.pop(key, None)
+            sent_interception = False
             if ctx and ctx is not True:
                 try:
                     ctx.__exit__(None, None, None)
+                    sent_interception = True
+                except Exception:
+                    pass
+            if not sent_interception:
+                try:
+                    ctypes.windll.user32.mouse_event(up_flag, 0, 0, 0, 0)
                 except Exception:
                     pass
     else:
@@ -455,13 +473,24 @@ def tcp_listener():
                     break
                 buf.extend(chunk)
                 # Frame format: 2-byte little endian unsigned short (length) + payload
-                while len(buf) >= 2:
-                    packet_len = struct.unpack("<H", buf[:2])[0]
-                    if len(buf) < 2 + packet_len:
+                # Sliding pointer parser: zero array reallocations during 1000Hz ultra-polling
+                offset = 0
+                buf_len = len(buf)
+                while buf_len - offset >= 2:
+                    packet_len = struct.unpack_from("<H", buf, offset)[0]
+                    if packet_len > 4096 or packet_len == 0:
+                        offset += 1
+                        continue
+                    if buf_len - offset < 2 + packet_len:
                         break  # Wait for remaining packet payload to arrive
-                    payload = bytes(buf[2 : 2 + packet_len])
-                    del buf[: 2 + packet_len]
+                    payload = bytes(buf[offset + 2 : offset + 2 + packet_len])
+                    offset += 2 + packet_len
                     dispatch_packet(payload)
+                if offset > 0:
+                    if offset >= buf_len:
+                        buf.clear()
+                    else:
+                        del buf[:offset]
             print("[USB/TCP] phone disconnected")
             release_everything()
         except Exception as e:
