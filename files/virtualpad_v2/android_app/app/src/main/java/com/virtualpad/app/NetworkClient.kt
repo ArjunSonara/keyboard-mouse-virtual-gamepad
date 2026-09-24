@@ -90,6 +90,12 @@ class NetworkClient {
     // Pre-allocated 13-byte buffer: 2 bytes length prefix (11) + 11 bytes PACKET_SIZE payload
     private val usbPacketBuffer = ByteBuffer.allocate(13).order(ByteOrder.LITTLE_ENDIAN)
 
+    // Pre-allocated UDP buffer & DatagramPacket for zero-allocation 1000Hz transmission
+    private val udpPacketBuffer = ByteBuffer.allocate(PACKET_SIZE).order(ByteOrder.LITTLE_ENDIAN)
+    private val udpPacketBytes = ByteArray(PACKET_SIZE)
+    private val udpLock = Any()
+    @Volatile private var cachedUdpPacket: DatagramPacket? = null
+
     private val sendExecutor = Executors.newSingleThreadExecutor()
     @Volatile private var targetAddress: InetAddress? = null
 
@@ -243,6 +249,38 @@ class NetworkClient {
         }
     }
 
+    /**
+     * Writes state directly to UDP DatagramSocket using pre-allocated buffers.
+     * Zero-allocation in 1000Hz ultra-polling mode prevents ART Garbage Collector pauses.
+     */
+    private fun writeUdpStateDirect(state: ControllerState, redundantBurst: Boolean = false) {
+        val addr = targetAddress ?: return
+        synchronized(udpLock) {
+            try {
+                udpPacketBuffer.clear()
+                udpPacketBuffer.put(PACKET_MAGIC)
+                udpPacketBuffer.putInt(state.buttons)
+                udpPacketBuffer.put((state.stickX.coerceIn(-1f, 1f) * 127).toInt().toByte())
+                udpPacketBuffer.put((state.stickY.coerceIn(-1f, 1f) * 127).toInt().toByte())
+                udpPacketBuffer.putShort(state.mouseDx.coerceIn(-32000, 32000).toShort())
+                udpPacketBuffer.putShort(state.mouseDy.coerceIn(-32000, 32000).toShort())
+                System.arraycopy(udpPacketBuffer.array(), 0, udpPacketBytes, 0, PACKET_SIZE)
+
+                var pkt = cachedUdpPacket
+                if (pkt == null || pkt.address != addr || pkt.port != port) {
+                    pkt = DatagramPacket(udpPacketBytes, PACKET_SIZE, addr, port)
+                    cachedUdpPacket = pkt
+                } else {
+                    pkt.setData(udpPacketBytes, 0, PACKET_SIZE)
+                }
+                udpSocket.send(pkt)
+                if (redundantBurst) {
+                    udpSocket.send(pkt)
+                }
+            } catch (_: Exception) {}
+        }
+    }
+
     /** Event-driven: call this every time touch input changes. Sends immediately. */
     fun submit(state: ControllerState) {
         val buttonChanged = state.buttons != lastSent.buttons
@@ -257,18 +295,10 @@ class NetworkClient {
                 // completely bypassing SingleThreadExecutor queuing and GC allocations.
                 writeUsbStateDirect(state)
             } else {
-                val bytes = state.toBytes()
+                // Zero-allocation UDP streaming for 1000Hz ultra-polling:
+                // Reuses pre-allocated datagram packet and byte array, eliminating GC allocation pressure.
                 sendExecutor.execute {
-                    try {
-                        sendRaw(bytes)
-                        if (buttonChanged && mode == TransportMode.WIFI) {
-                            // Multi-Touch Burst Redundancy: 2x UDP packet transmission guarantees
-                            // that simultaneous button presses arrive immediately even on lossy Wi-Fi.
-                            sendRaw(bytes)
-                        }
-                    } catch (_: Exception) {
-                        // ignore - heartbeat/next event will retry
-                    }
+                    writeUdpStateDirect(state, redundantBurst = (buttonChanged && mode == TransportMode.WIFI))
                 }
             }
             // mouse delta is one-shot; don't let the heartbeat replay it
