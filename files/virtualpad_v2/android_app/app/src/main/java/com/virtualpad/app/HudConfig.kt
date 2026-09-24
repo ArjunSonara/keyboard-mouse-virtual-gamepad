@@ -1627,12 +1627,21 @@ object HudConfig {
     }
 
     // Pro Esports Touch Aim Engine
+    private const val KEY_ESPORTS_ENGINE_ENABLED = "aim_esports_engine_enabled"
     private const val KEY_DPI_NORM_ENABLED = "aim_dpi_norm_enabled"
     private const val KEY_JITTER_FILTER_ENABLED = "aim_jitter_filter_enabled"
     private const val KEY_JITTER_THRESHOLD = "aim_jitter_threshold"
     private const val KEY_AIM_CURVE_MODE = "aim_curve_mode"
     private const val KEY_SCURVE_DAMPENING = "aim_scurve_dampening"
     private const val KEY_SCURVE_FLICK_BOOST = "aim_scurve_flick_boost"
+
+    fun isEsportsAimEngineEnabled(context: Context): Boolean {
+        return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getBoolean(KEY_ESPORTS_ENGINE_ENABLED, true)
+    }
+
+    fun setEsportsAimEngineEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit().putBoolean(KEY_ESPORTS_ENGINE_ENABLED, enabled).apply()
+    }
 
     fun isDpiNormalizationEnabled(context: Context): Boolean {
         return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getBoolean(KEY_DPI_NORM_ENABLED, true)

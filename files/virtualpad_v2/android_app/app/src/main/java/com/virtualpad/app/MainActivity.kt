@@ -411,8 +411,8 @@ class MainActivity : Activity(), SensorEventListener {
             rawWy = -rawWy
         }
 
-        // Noise deadzone filter (eliminate resting drift / hand tremors)
-        val deadzone = 0.015f
+        // Noise deadzone filter (eliminate resting drift / hand tremors while allowing micro-tilts)
+        val deadzone = 0.012f
         val wx = if (abs(rawWx) < deadzone) 0f else rawWx - kotlin.math.sign(rawWx) * deadzone
         val wy = if (abs(rawWy) < deadzone) 0f else rawWy - kotlin.math.sign(rawWy) * deadzone
         val wz = if (abs(rawWz) < deadzone) 0f else rawWz - kotlin.math.sign(rawWz) * deadzone
@@ -447,8 +447,9 @@ class MainActivity : Activity(), SensorEventListener {
         if (HudConfig.isGyroInvertX(this)) targetDx = -targetDx
         if (HudConfig.isGyroInvertY(this)) targetDy = -targetDy
 
-        // Low-pass exponential smoothing filter
-        val alpha = HudConfig.getGyroSmoothing(this).coerceIn(0.2f, 0.95f)
+        // Low-pass exponential smoothing filter (anti-handshake for micro-headshots)
+        val smoothSetting = HudConfig.getGyroSmoothing(this).coerceIn(0.2f, 0.95f)
+        val alpha = (1.0f - smoothSetting * 0.70f).coerceIn(0.12f, 0.92f)
         smoothedGyroDx = alpha * targetDx + (1f - alpha) * smoothedGyroDx
         smoothedGyroDy = alpha * targetDy + (1f - alpha) * smoothedGyroDy
 
@@ -1051,25 +1052,63 @@ class MainActivity : Activity(), SensorEventListener {
         // Section: Pro Esports Touch Aim Engine
         val esportsCard = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            background = createCardDrawable(Color.parseColor("#1B2234"), 14f)
-            setPadding(24, 18, 24, 18)
+            background = createCardDrawable(Color.parseColor("#1B2234"), 14f, Color.parseColor("#8A2BE2"), 1)
+            setPadding(20, 16, 20, 16)
         }
-        val esportsBtn = Button(this).apply {
+        val esportsHeader = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val esportsTitleLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        val esportsTitle = TextView(this).apply {
             text = "🎯 PRO ESPORTS TOUCH AIM ENGINE"
             textSize = 13f
             paint.isFakeBoldText = true
             setTextColor(Color.WHITE)
-            background = createCardDrawable(Color.parseColor("#8A2BE2"), 12f)
-            setPadding(24, 14, 24, 14)
+        }
+        val esportsStatus = TextView(this).apply {
+            text = if (controllerView.isEsportsAimEngineEnabled) "● ACTIVE (Filters & Curves Enabled)" else "○ BYPASSED (100% Pure Raw Input)"
+            setTextColor(if (controllerView.isEsportsAimEngineEnabled) Color.parseColor("#7EE787") else Color.parseColor("#8B949E"))
+            textSize = 11f
+        }
+        esportsTitleLayout.addView(esportsTitle)
+        esportsTitleLayout.addView(esportsStatus)
+        esportsHeader.addView(esportsTitleLayout, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+
+        val esportsMasterSwitch = Switch(this).apply {
+            isChecked = controllerView.isEsportsAimEngineEnabled
+            setOnCheckedChangeListener { _, isChecked ->
+                controllerView.isEsportsAimEngineEnabled = isChecked
+                HudConfig.setEsportsAimEngineEnabled(this@MainActivity, isChecked)
+                esportsStatus.text = if (isChecked) "● ACTIVE (Filters & Curves Enabled)" else "○ BYPASSED (100% Pure Raw Input)"
+                esportsStatus.setTextColor(if (isChecked) Color.parseColor("#7EE787") else Color.parseColor("#8B949E"))
+                Toast.makeText(this@MainActivity, if (isChecked) "🎯 Esports Aim Engine: ON" else "⚡ Esports Aim Engine: OFF (Pure Raw Input)", Toast.LENGTH_SHORT).show()
+            }
+        }
+        esportsHeader.addView(esportsMasterSwitch)
+        esportsCard.addView(esportsHeader)
+
+        val esportsBtn = Button(this).apply {
+            text = "⚙️ CONFIGURE AIM ENGINE & 6-AXIS GYRO →"
+            textSize = 12f
+            paint.isFakeBoldText = true
+            setTextColor(Color.WHITE)
+            background = createCardDrawable(Color.parseColor("#8A2BE2"), 10f)
+            setPadding(20, 12, 20, 12)
             setOnClickListener {
                 showEsportsAimEngineDialog()
             }
         }
-        esportsCard.addView(esportsBtn)
+        esportsCard.addView(esportsBtn, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+            topMargin = 12
+        })
+
         val esportsSubtitle = TextView(this).apply {
-            text = "DPI Normalization • Jitter Filter • Valorant / CS2 / Warzone Aim Curves"
+            text = "DPI Normalization • Anti-Tremor Deadband • Custom S-Curves • Smooth 6-Axis Gyro Aiming"
             setTextColor(Color.parseColor("#79C0FF"))
-            textSize = 11f
+            textSize = 10f
             gravity = Gravity.CENTER
             setPadding(0, 8, 0, 0)
         }
@@ -1387,6 +1426,56 @@ class MainActivity : Activity(), SensorEventListener {
         }
         layout.addView(descView)
 
+        // --- Master Engine Switch Card ---
+        val masterCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = createCardDrawable(Color.parseColor("#1B2234"), 16f, Color.parseColor("#8A2BE2"), 2)
+            setPadding(22, 18, 22, 18)
+        }
+        val masterHeader = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val masterTitleLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        val masterTitle = TextView(this).apply {
+            text = "⚡ Master Aim Engine Switch"
+            setTextColor(Color.WHITE)
+            textSize = 15f
+            paint.isFakeBoldText = true
+        }
+        val masterStatus = TextView(this).apply {
+            text = if (controllerView.isEsportsAimEngineEnabled) "● ACTIVE - Custom math & filters applied" else "○ BYPASSED - 100% Pure Raw Input"
+            setTextColor(if (controllerView.isEsportsAimEngineEnabled) Color.parseColor("#7EE787") else Color.parseColor("#8B949E"))
+            textSize = 11f
+        }
+        masterTitleLayout.addView(masterTitle)
+        masterTitleLayout.addView(masterStatus)
+        masterHeader.addView(masterTitleLayout, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+
+        val masterSwitch = Switch(this).apply {
+            isChecked = controllerView.isEsportsAimEngineEnabled
+            setOnCheckedChangeListener { _, isChecked ->
+                controllerView.isEsportsAimEngineEnabled = isChecked
+                HudConfig.setEsportsAimEngineEnabled(this@MainActivity, isChecked)
+                masterStatus.text = if (isChecked) "● ACTIVE - Custom math & filters applied" else "○ BYPASSED - 100% Pure Raw Input"
+                masterStatus.setTextColor(if (isChecked) Color.parseColor("#7EE787") else Color.parseColor("#8B949E"))
+                Toast.makeText(this@MainActivity, if (isChecked) "⚡ Esports Aim Engine: ON" else "⚡ Esports Aim Engine: OFF (100% Pure Raw Input)", Toast.LENGTH_SHORT).show()
+            }
+        }
+        masterHeader.addView(masterSwitch)
+        masterCard.addView(masterHeader)
+
+        val masterDesc = TextView(this).apply {
+            text = "• When ON: All mathematical aim calibration features below (DPI Normalization, Jitter Suppression, Curves, and 6-Axis Gyro) are active.\n• When OFF: Completely bypasses all filters into pure 1:1 raw hardware touch. Sub-settings below remain saved and will resume when toggled back ON."
+            setTextColor(Color.parseColor("#8B949E"))
+            textSize = 11f
+            setPadding(0, 8, 0, 0)
+        }
+        masterCard.addView(masterDesc)
+        layout.addView(masterCard, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { bottomMargin = 16 })
+
         // --- Feature 1: Physical Millimeter Normalization (DPI Calibration) ---
         val dpiCard = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -1624,6 +1713,271 @@ class MainActivity : Activity(), SensorEventListener {
         curveCard.addView(modeDesc)
         curveCard.addView(tweakLayout)
         layout.addView(curveCard, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { bottomMargin = 16 })
+
+        // --- Feature 4: Smooth 6-Axis Gyro Aiming Integration (Tilt Phone for Micro-Headshots) ---
+        val gyroCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = createCardDrawable(Color.parseColor("#161B22"), 14f, Color.parseColor("#388BFD"), 1)
+            setPadding(20, 16, 20, 16)
+        }
+        val gyroHeader = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val gyroTitleLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        val gyroTitle = TextView(this).apply {
+            text = "🎯 Smooth 6-Axis Gyro Aiming"
+            setTextColor(Color.parseColor("#58A6FF"))
+            textSize = 14f
+            paint.isFakeBoldText = true
+        }
+        val gyroSubtitle = TextView(this).apply {
+            text = "Tilt phone for micro-headshots • DualSense & Steam Input grade"
+            setTextColor(Color.parseColor("#79C0FF"))
+            textSize = 11f
+        }
+        gyroTitleLayout.addView(gyroTitle)
+        gyroTitleLayout.addView(gyroSubtitle)
+        gyroHeader.addView(gyroTitleLayout, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+
+        val gyroSwitch = Switch(this).apply {
+            isChecked = HudConfig.isGyroEnabled(this@MainActivity)
+            setOnCheckedChangeListener { _, isChecked ->
+                gyroActive = isChecked
+                HudConfig.setGyroEnabled(this@MainActivity, isChecked)
+                Toast.makeText(this@MainActivity, if (isChecked) "🎯 6-Axis Gyro Aiming ON" else "Gyro Aiming OFF", Toast.LENGTH_SHORT).show()
+            }
+        }
+        gyroHeader.addView(gyroSwitch)
+        gyroCard.addView(gyroHeader)
+
+        val gyroDesc = TextView(this).apply {
+            text = "Enables hardware 6-axis gyroscope motion tracking. Swipe screen with thumb for large 90°/180° turns, then tilt your phone physically for the final 2-5 pixel micro-adjustment directly onto heads in Valorant & CS2."
+            setTextColor(Color.parseColor("#8B949E"))
+            textSize = 11f
+            setPadding(0, 8, 0, 10)
+        }
+        gyroCard.addView(gyroDesc)
+
+        // Aim-Only / ADS Ratchet Toggle
+        val aimOnlyRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, 4, 0, 8)
+        }
+        val aimOnlyLabelLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        val aimOnlyLabel = TextView(this).apply {
+            text = "Aim-Only Ratchet (Touch/ADS Gating)"
+            setTextColor(Color.WHITE)
+            textSize = 12f
+            paint.isFakeBoldText = true
+        }
+        val aimOnlySub = TextView(this).apply {
+            text = "Engage gyro ONLY while touching look pad or holding LT/RT. Reposition wrists freely without spinning crosshair."
+            setTextColor(Color.parseColor("#8B949E"))
+            textSize = 10f
+        }
+        aimOnlyLabelLayout.addView(aimOnlyLabel)
+        aimOnlyLabelLayout.addView(aimOnlySub)
+        aimOnlyRow.addView(aimOnlyLabelLayout, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+
+        val aimOnlySwitch = Switch(this).apply {
+            isChecked = HudConfig.isGyroAimOnly(this@MainActivity)
+            setOnCheckedChangeListener { _, isChecked ->
+                HudConfig.setGyroAimOnly(this@MainActivity, isChecked)
+            }
+        }
+        aimOnlyRow.addView(aimOnlySwitch)
+        gyroCard.addView(aimOnlyRow)
+
+        // Micro-Headshot Sensitivity
+        val currentSens = HudConfig.getGyroSensX(this@MainActivity)
+        val gyroSensLabel = TextView(this).apply {
+            text = "Micro-Headshot Sensitivity: ${String.format("%.2f", currentSens)}x (Default: 1.50x)"
+            setTextColor(Color.WHITE)
+            textSize = 12f
+            setPadding(0, 6, 0, 4)
+        }
+        gyroCard.addView(gyroSensLabel)
+
+        val gyroSensBar = SeekBar(this).apply {
+            max = 300 // 0.20x to 3.00x
+            progress = (currentSens * 100).toInt().coerceIn(20, 300)
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar?, prog: Int, fromUser: Boolean) {
+                    val s = prog.coerceAtLeast(20) / 100f
+                    gyroSensLabel.text = "Micro-Headshot Sensitivity: ${String.format("%.2f", s)}x (Default: 1.50x)"
+                    if (fromUser) {
+                        HudConfig.setGyroSensX(this@MainActivity, s)
+                        HudConfig.setGyroSensY(this@MainActivity, s * 0.75f)
+                    }
+                }
+                override fun onStartTrackingTouch(sb: SeekBar?) {}
+                override fun onStopTrackingTouch(sb: SeekBar?) {}
+            })
+        }
+        gyroCard.addView(gyroSensBar)
+
+        // Presets for Gyro Sensitivity
+        val presetRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, 4, 0, 10)
+        }
+        fun createPresetBtn(label: String, sensVal: Float): Button {
+            return Button(this).apply {
+                text = label
+                textSize = 10f
+                paint.isFakeBoldText = true
+                setTextColor(Color.parseColor("#58A6FF"))
+                background = createCardDrawable(Color.parseColor("#21262D"), 8f)
+                setPadding(8, 8, 8, 8)
+                setOnClickListener {
+                    gyroSensBar.progress = (sensVal * 100).toInt()
+                    HudConfig.setGyroSensX(this@MainActivity, sensVal)
+                    HudConfig.setGyroSensY(this@MainActivity, sensVal * 0.75f)
+                    gyroSensLabel.text = "Micro-Headshot Sensitivity: ${String.format("%.2f", sensVal)}x"
+                    Toast.makeText(this@MainActivity, "Applied: $label", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+        presetRow.addView(createPresetBtn("🎯 Sniper (0.8x)", 0.8f), LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = 6 })
+        presetRow.addView(createPresetBtn("⚡ Tactical (1.5x)", 1.5f), LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = 6 })
+        presetRow.addView(createPresetBtn("🚀 Fast (2.2x)", 2.2f), LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        gyroCard.addView(presetRow)
+
+        // Anti-Handshake Smoothing
+        val currentSmooth = HudConfig.getGyroSmoothing(this@MainActivity)
+        val gyroSmoothLabel = TextView(this).apply {
+            val pct = (currentSmooth * 100).toInt()
+            text = "Anti-Handshake Smoothing: $pct% (Rock-solid headshot hold)"
+            setTextColor(Color.WHITE)
+            textSize = 12f
+            setPadding(0, 6, 0, 4)
+        }
+        gyroCard.addView(gyroSmoothLabel)
+
+        val gyroSmoothBar = SeekBar(this).apply {
+            max = 95
+            progress = (currentSmooth * 100).toInt().coerceIn(20, 95)
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar?, prog: Int, fromUser: Boolean) {
+                    val alpha = prog.coerceAtLeast(20) / 100f
+                    gyroSmoothLabel.text = "Anti-Handshake Smoothing: $prog% (Rock-solid headshot hold)"
+                    if (fromUser) {
+                        HudConfig.setGyroSmoothing(this@MainActivity, alpha)
+                    }
+                }
+                override fun onStartTrackingTouch(sb: SeekBar?) {}
+                override fun onStopTrackingTouch(sb: SeekBar?) {}
+            })
+        }
+        gyroCard.addView(gyroSmoothBar)
+
+        // Motion Axis Selector
+        val gyroAxisLabel = TextView(this).apply {
+            text = "Active Tilt Axis Mode:"
+            setTextColor(Color.parseColor("#8B949E"))
+            textSize = 12f
+            setPadding(0, 8, 0, 4)
+        }
+        gyroCard.addView(gyroAxisLabel)
+
+        val gyroAxisRg = RadioGroup(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        val rbFull = RadioButton(this).apply {
+            text = "Full 2D (Both Horizontal & Vertical Tilt Aim)"
+            setTextColor(Color.WHITE)
+            textSize = 12f
+            id = View.generateViewId()
+        }
+        val rbHoriz = RadioButton(this).apply {
+            text = "Horizontal Only (Locks Head-Level Crosshair for Valorant / CS2)"
+            setTextColor(Color.WHITE)
+            textSize = 12f
+            id = View.generateViewId()
+        }
+        val rbVert = RadioButton(this).apply {
+            text = "Vertical Only (Recoil Pull-Down Compensation)"
+            setTextColor(Color.WHITE)
+            textSize = 12f
+            id = View.generateViewId()
+        }
+        gyroAxisRg.addView(rbFull)
+        gyroAxisRg.addView(rbHoriz)
+        gyroAxisRg.addView(rbVert)
+
+        when (HudConfig.getGyroAxisMode(this@MainActivity)) {
+            HudConfig.GYRO_AXIS_HORIZONTAL_ONLY -> gyroAxisRg.check(rbHoriz.id)
+            HudConfig.GYRO_AXIS_VERTICAL_ONLY -> gyroAxisRg.check(rbVert.id)
+            else -> gyroAxisRg.check(rbFull.id)
+        }
+        gyroAxisRg.setOnCheckedChangeListener { _, checkedId ->
+            val mode = when (checkedId) {
+                rbHoriz.id -> HudConfig.GYRO_AXIS_HORIZONTAL_ONLY
+                rbVert.id -> HudConfig.GYRO_AXIS_VERTICAL_ONLY
+                else -> HudConfig.GYRO_AXIS_FULL
+            }
+            HudConfig.setGyroAxisMode(this@MainActivity, mode)
+        }
+        gyroCard.addView(gyroAxisRg)
+
+        // Axis Inversion
+        val gyroInvertRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, 8, 0, 4)
+        }
+        val gyroInvertXCheck = CheckBox(this).apply {
+            text = "Invert Horizontal (Yaw)"
+            setTextColor(Color.parseColor("#E6EDF3"))
+            textSize = 11f
+            isChecked = HudConfig.isGyroInvertX(this@MainActivity)
+            setOnCheckedChangeListener { _, isChecked ->
+                HudConfig.setGyroInvertX(this@MainActivity, isChecked)
+            }
+        }
+        val gyroInvertYCheck = CheckBox(this).apply {
+            text = "Invert Vertical (Pitch)"
+            setTextColor(Color.parseColor("#E6EDF3"))
+            textSize = 11f
+            isChecked = HudConfig.isGyroInvertY(this@MainActivity)
+            setOnCheckedChangeListener { _, isChecked ->
+                HudConfig.setGyroInvertY(this@MainActivity, isChecked)
+            }
+        }
+        gyroInvertRow.addView(gyroInvertXCheck, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        gyroInvertRow.addView(gyroInvertYCheck, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        gyroCard.addView(gyroInvertRow)
+
+        // Pro Esports Strategy Tip Banner
+        val tipCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = createCardDrawable(Color.parseColor("#1B2234"), 10f, Color.parseColor("#58A6FF"), 1)
+            setPadding(14, 12, 14, 12)
+        }
+        val tipTitle = TextView(this).apply {
+            text = "💡 Pro Esports Micro-Aim Strategy"
+            setTextColor(Color.parseColor("#58A6FF"))
+            textSize = 12f
+            paint.isFakeBoldText = true
+        }
+        val tipText = TextView(this).apply {
+            text = "Use your right thumb on the touch look pad for rapid 90°/180° flick turns. Once crosshair is near the target, gently tilt your phone using 6-axis gyro for pixel-perfect headshots!"
+            setTextColor(Color.parseColor("#C9D1D9"))
+            textSize = 11f
+            setPadding(0, 4, 0, 0)
+        }
+        tipCard.addView(tipTitle)
+        tipCard.addView(tipText)
+        gyroCard.addView(tipCard, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+            topMargin = 10
+        })
+
+        layout.addView(gyroCard, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { bottomMargin = 16 })
 
         AlertDialog.Builder(this)
             .setView(scroll)

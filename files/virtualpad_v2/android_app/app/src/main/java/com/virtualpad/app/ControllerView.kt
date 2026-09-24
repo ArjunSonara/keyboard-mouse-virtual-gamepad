@@ -362,6 +362,7 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
     var mouseSensitivity = 1.75f
 
     // Pro Esports Touch Aim Engine
+    var isEsportsAimEngineEnabled = true
     var isDpiNormalizationEnabled = true
     var isJitterFilterEnabled = true
     var jitterFilterThreshold = 0.15f
@@ -375,6 +376,11 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
     }
 
     fun processAimDelta(rawDx: Float, rawDy: Float): Pair<Float, Float> {
+        // Master Bypass: when Esports Aim Engine is OFF, pass 100% pure raw uncalibrated input
+        if (!isEsportsAimEngineEnabled) {
+            return Pair(rawDx, rawDy)
+        }
+
         // 1. Physical DPI Normalization
         var dx = if (isDpiNormalizationEnabled) rawDx * dpiScaleFactor else rawDx
         var dy = if (isDpiNormalizationEnabled) rawDy * dpiScaleFactor else rawDy
@@ -533,6 +539,7 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
         stickTouchScale = HudConfig.getStickTouchScale(context)
         stickFloatingMode = HudConfig.isStickFloatingMode(context)
         currentSteeringMode = HudConfig.getSteeringMode(context)
+        isEsportsAimEngineEnabled = HudConfig.isEsportsAimEngineEnabled(context)
         isDpiNormalizationEnabled = HudConfig.isDpiNormalizationEnabled(context)
         isJitterFilterEnabled = HudConfig.isJitterFilterEnabled(context)
         jitterFilterThreshold = HudConfig.getJitterFilterThreshold(context)
@@ -565,6 +572,7 @@ class ControllerView(context: Context, attrs: AttributeSet? = null) : View(conte
             buttonTextOpacity = HudConfig.getButtonTextOpacity(context)
             areButtonsVisible = HudConfig.areButtonsVisible(context)
             currentSteeringMode = HudConfig.getSteeringMode(context)
+            isEsportsAimEngineEnabled = HudConfig.isEsportsAimEngineEnabled(context)
             isDpiNormalizationEnabled = HudConfig.isDpiNormalizationEnabled(context)
             isJitterFilterEnabled = HudConfig.isJitterFilterEnabled(context)
             jitterFilterThreshold = HudConfig.getJitterFilterThreshold(context)
