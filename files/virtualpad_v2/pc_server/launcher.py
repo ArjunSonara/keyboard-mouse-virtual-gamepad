@@ -546,6 +546,8 @@ def get_adb_bin():
 
 REVERSE_PORTS = [6001, 8080, 8081, 8082]
 pcmirror_process = None
+pcmirror_user_wanted = True
+_last_pcmirror_auto_restart = 0
 job_object_handle = None
 
 def init_job_object():
@@ -619,7 +621,8 @@ def get_pcmirror_bin():
     return shutil.which("PCMirror.exe")
 
 def start_pcmirror_daemon():
-    global pcmirror_process
+    global pcmirror_process, pcmirror_user_wanted
+    pcmirror_user_wanted = True
     # Preflight sweep: cleanly kill any zombie PCMirror.exe from previous dirty crashes
     try:
         silent_run(["taskkill", "/F", "/IM", "PCMirror.exe"], capture_output=True, timeout=3)
@@ -643,7 +646,8 @@ def start_pcmirror_daemon():
         print(f"[ERROR] Failed to start PCMirror: {e}")
 
 def stop_pcmirror_daemon():
-    global pcmirror_process
+    global pcmirror_process, pcmirror_user_wanted
+    pcmirror_user_wanted = False
     if pcmirror_process:
         try:
             pcmirror_process.terminate()
@@ -658,7 +662,7 @@ def stop_pcmirror_daemon():
     print("[INFO] PCMirror native engine stopped.")
 
 def toggle_pcmirror_daemon():
-    global pcmirror_process
+    global pcmirror_process, pcmirror_user_wanted
     is_running = False
     if pcmirror_process and pcmirror_process.poll() is None:
         is_running = True
@@ -902,6 +906,7 @@ def main():
     btn_toggle_mirror.pack(side="right", padx=4)
 
     def update_gui_loop():
+        global _last_pcmirror_auto_restart
         conn_label.config(text=f"Status: {connection_status}")
         usb_label.config(text=usb_status_str)
         is_alive = pcmirror_process is not None and pcmirror_process.poll() is None
@@ -910,9 +915,19 @@ def main():
             mirror_status_label.config(fg="#3FB950")
             btn_toggle_mirror.config(text="Turn OFF", bg="#21262D", fg="#F85149")
         else:
-            mirror_status_var.set("⚡ Pure Gamepad: OFF (0% CPU/GPU)")
-            mirror_status_label.config(fg="#E3B341")
-            btn_toggle_mirror.config(text="Turn ON", bg="#238636", fg="#FFFFFF")
+            if pcmirror_user_wanted:
+                mirror_status_var.set("🔄 Mirror Engine Recovering...")
+                mirror_status_label.config(fg="#58A6FF")
+                btn_toggle_mirror.config(text="Turn OFF", bg="#21262D", fg="#F85149")
+                now = time.time()
+                if now - _last_pcmirror_auto_restart >= 2.5:
+                    _last_pcmirror_auto_restart = now
+                    print("[WATCHDOG] PCMirror engine exited or crashed. Auto-recovering...")
+                    start_pcmirror_daemon()
+            else:
+                mirror_status_var.set("⚡ Pure Gamepad: OFF (0% CPU/GPU)")
+                mirror_status_label.config(fg="#E3B341")
+                btn_toggle_mirror.config(text="Turn ON", bg="#238636", fg="#FFFFFF")
         root.after(1000, update_gui_loop)
 
     root.after(1000, update_gui_loop)
